@@ -138,7 +138,7 @@ int ObIKFTParser::process_one_char(TokenizeContext &ctx,
   for (ObList<ObIIKProcessor *, ObIAllocator>::iterator iter = segmenters_.begin();
        OB_SUCC(ret) && iter != segmenters_.end();
        iter++) {
-    if (OB_FAIL((*iter)->process(ctx))) {
+    if (OB_FAIL((*iter)->process(ctx, ch, char_len, type))) {
     }
   }
   return ret;
@@ -159,8 +159,7 @@ int ObIKFTParser::process_next_batch()
       const char *ch;
       uint8_t char_len = 0;
       ObFTCharUtil::CharType type = ObFTCharUtil::CharType::USELESS;
-      if (OB_FAIL(ctx_->current_char(ch, char_len))) {
-      } else if (OB_FAIL(ctx_->current_char_type(type))) {
+      if (OB_FAIL(ctx_->current_char_and_type(ch, char_len, type))) {
       } else if (OB_FAIL(process_one_char(*ctx_, ch, char_len, type))) {
       } else {
         // 1. check segmention
@@ -178,9 +177,8 @@ int ObIKFTParser::process_next_batch()
     }
 
     if (OB_SUCC(ret) || OB_ITER_END == ret) {
-      ObIKArbitrator arb;
-      if (OB_FAIL(arb.process(*ctx_))) {
-      } else if (OB_FAIL(arb.output_result(*ctx_))) {
+      if (OB_FAIL(arbitrator_.process(*ctx_))) {
+      } else if (OB_FAIL(arbitrator_.output_result(*ctx_))) {
       }
     } else {
       // Already logged.
@@ -253,21 +251,35 @@ int ObIKFTParser::init_dict(const ObFTParserParam &param)
                                   ObCharsetType::CHARSET_UTF8MB4,
                                   ObCollationType::CS_TYPE_UTF8MB4_BIN);
 
-  if (should_read_newest_table()) {
+  if (OB_ISNULL(hub_)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (should_read_newest_table()) {
     // clear dict cache, always false now
-  } else {
     if (OB_FAIL(init_single_dict(main_dict_desc, cache_main_))) {
     } else if (OB_FAIL(init_single_dict(quan_dict_desc, cache_quan_))) {
-    } else if (OB_FAIL(init_single_dict(stopword_dict_desc, cache_stop_))) {
+    }
+    if (OB_FAIL(ret)) {
+      // already logged.
+    } else if (OB_FAIL(build_dict_from_cache(main_dict_desc, cache_main_, dict_main_))) {
+    } else if (OB_FAIL(build_dict_from_cache(quan_dict_desc, cache_quan_, dict_quan_))) {
+    }
+  } else {
+    // The built-in dictionaries do not change within a process, so the
+    // parsed dictionaries are built once by the dict hub and then shared
+    // by all the parses.  Building them per parse costs a KV cache
+    // handle for every dictionary range.
+    if (OB_FAIL(hub_->get_or_build_dict(main_dict_desc, dict_main_))) {
+    } else {
+      dict_main_owned_ = false;
+      if (OB_FAIL(hub_->get_or_build_dict(quan_dict_desc, dict_quan_))) {
+      } else {
+        dict_quan_owned_ = false;
+      }
     }
   }
-
-  if (OB_FAIL(ret)) {
-    // already logged.
-  } else if (OB_FAIL(build_dict_from_cache(main_dict_desc, cache_main_, dict_main_))) {
-  } else if (OB_FAIL(build_dict_from_cache(quan_dict_desc, cache_quan_, dict_quan_))) {
-  } else if (OB_FAIL(build_dict_from_cache(stopword_dict_desc, cache_stop_, dict_stop_))) {
-  }
+  // The IK stopword dictionary is not consulted: the only place that used it
+  // is commented out in get_next_token(), so loading it costs a cache handle,
+  // a range dictionary and a cache dictionary on every parse for nothing.
 
   return ret;
 }
@@ -367,16 +379,25 @@ void ObIKFTParser::reset()
   cache_stop_.reset();
 
   if (!OB_ISNULL(dict_main_)) {
-    dict_main_->~ObIFTDict();
-    allocator_.free(dict_main_);
+    if (dict_main_owned_) {
+      dict_main_->~ObIFTDict();
+      allocator_.free(dict_main_);
+    }
+    dict_main_ = nullptr;
   }
   if (!OB_ISNULL(dict_quan_)) {
-    dict_quan_->~ObIFTDict();
-    allocator_.free(dict_quan_);
+    if (dict_quan_owned_) {
+      dict_quan_->~ObIFTDict();
+      allocator_.free(dict_quan_);
+    }
+    dict_quan_ = nullptr;
   }
   if (!OB_ISNULL(dict_stop_)) {
-    dict_stop_->~ObIFTDict();
-    allocator_.free(dict_stop_);
+    if (dict_stop_owned_) {
+      dict_stop_->~ObIFTDict();
+      allocator_.free(dict_stop_);
+    }
+    dict_stop_ = nullptr;
   }
 
   is_inited_ = false;

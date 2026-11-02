@@ -22,6 +22,7 @@
 #include "storage/fts/dict/ob_ft_dict.h"
 #include "storage/fts/dict/ob_ft_dict_def.h"
 #include "storage/fts/ik/ob_ik_processor.h"
+#include "storage/fts/ik/ob_ik_arbitrator.h"
 #include "data_plane/fts/ob_fts_parser.h"
 
 #include <cstdint>
@@ -46,7 +47,10 @@ public:
         cache_stop_(allocator),
         dict_main_(nullptr),
         dict_quan_(nullptr),
-        dict_stop_(nullptr)
+        dict_stop_(nullptr),
+        dict_main_owned_(true),
+        dict_quan_owned_(true),
+        dict_stop_owned_(true)
   {
   }
 
@@ -95,6 +99,8 @@ private:
 
   ObCollationType coll_type_;
   TokenizeContext *ctx_;
+  // reused across the word batches of one document
+  ObIKArbitrator arbitrator_;
   ObFTDictHub *hub_;
   ObList<ObIIKProcessor *, ObIAllocator> segmenters_;
 
@@ -106,6 +112,12 @@ private:
   ObIFTDict *dict_main_;
   ObIFTDict *dict_quan_;
   ObIFTDict *dict_stop_;
+
+  // whether the dictionary object is owned by this parser.  A dictionary
+  // shared by the dict hub is not owned by the parser.
+  bool dict_main_owned_;
+  bool dict_quan_owned_;
+  bool dict_stop_owned_;
 
   DISABLE_COPY_ASSIGN(ObIKFTParser);
 };
