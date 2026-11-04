@@ -19,6 +19,7 @@
 #include "share/ob_rpc_struct.h"
 #include "sql/resolver/ddl/ob_ddl_stmt.h"
 #include "sql/resolver/ddl/ob_partitioned_stmt.h"
+#include "sql/resolver/ddl/ai_column_def.h"
 namespace oceanbase
 {
 namespace sql
@@ -80,9 +81,13 @@ public:
   {
     return index_partition_resolve_results_;
   }
+  int add_ai_column_def(AIColumnDef *def) { return ai_column_defs_.push_back(def); }
+  common::ObIArray<AIColumnDef *> &get_ai_column_defs() { return ai_column_defs_; }
+  const common::ObIArray<AIColumnDef *> &get_ai_column_defs() const { return ai_column_defs_; }
   TO_STRING_KV(K_(part_type));
 private:
   common::ObSArray<ObPartitionResolveResult> index_partition_resolve_results_;
+  common::ObSEArray<AIColumnDef *, 4> ai_column_defs_;
   share::schema::ObPartitionFuncType part_type_;
 private:
   DISALLOW_COPY_AND_ASSIGN(ObTableStmt);

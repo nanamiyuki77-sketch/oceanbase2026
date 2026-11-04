@@ -137,6 +137,67 @@ int ObCreateTableResolver::add_hidden_tablet_seq_col()
   return ret;
 }
 
+int ObCreateTableResolver::add_ai_column_hidden_columns()
+{
+  int ret = OB_SUCCESS;
+  ObCreateTableStmt *create_stmt = static_cast<ObCreateTableStmt *>(stmt_);
+  ObTableSchema &table_schema = create_stmt->get_create_table_arg().schema_;
+  ObIArray<AIColumnDef *> &defs = create_stmt->get_ai_column_defs();
+  for (int64_t i = 0; OB_SUCC(ret) && i < defs.count(); ++i) {
+    AIColumnDef *def = defs.at(i);
+    if (OB_ISNULL(def)) {
+      ret = OB_ERR_UNEXPECTED;
+    }
+    for (int64_t j = 0; OB_SUCC(ret) && j < defs.count(); ++j) {
+      AIColumnDef *other = defs.at(j);
+      for (int64_t k = 0; OB_NOT_NULL(other) && k < def->dependency_names_.count(); ++k) {
+        if (0 == def->dependency_names_.at(k).case_compare(other->column_name_)) {
+          ret = OB_NOT_SUPPORTED;
+        }
+      }
+    }
+    for (int kind = 0; OB_SUCC(ret) && kind < 3; ++kind) {
+      ObColumnSchemaV2 hidden;
+      char name[OB_MAX_COLUMN_NAME_LENGTH + 1];
+      const char *suffix = (0 == kind ? "state" : (1 == kind ? "request" : "result_spec"));
+      const int len = snprintf(name, sizeof(name), "__ai_%lu_%s", def->column_id_, suffix);
+      if (len <= 0 || len >= static_cast<int>(sizeof(name))) {
+        ret = OB_SIZE_OVERFLOW;
+      } else {
+        hidden.set_column_id(gen_column_id());
+        hidden.set_is_hidden(true);
+        hidden.set_nullable(true);
+        hidden.set_prev_column_id(UINT64_MAX);
+        hidden.set_next_column_id(UINT64_MAX);
+        if (0 == kind) {
+          hidden.set_data_type(ObIntType);
+          hidden.set_charset_type(CHARSET_BINARY);
+          hidden.set_collation_type(CS_TYPE_BINARY);
+          def->state_column_id_ = hidden.get_column_id();
+        } else {
+          hidden.set_data_type(ObVarcharType);
+          hidden.set_data_length(1 == kind ? 64 : 4096);
+          hidden.set_charset_type(table_schema.get_charset_type());
+          hidden.set_collation_type(table_schema.get_collation_type());
+          if (1 == kind) {
+            def->request_column_id_ = hidden.get_column_id();
+          } else {
+            def->result_spec_column_id_ = hidden.get_column_id();
+          }
+        }
+        ObString hidden_name(len, name);
+        if (OB_FAIL(hidden.set_column_name(hidden_name))) {
+        } else if (OB_FAIL(table_schema.add_column(hidden))) {
+        } else if (0 == kind && OB_FAIL(ob_write_string(*allocator_, hidden_name, def->state_column_name_))) {
+        } else if (1 == kind && OB_FAIL(ob_write_string(*allocator_, hidden_name, def->request_column_name_))) {
+        } else if (2 == kind && OB_FAIL(ob_write_string(*allocator_, hidden_name, def->result_spec_column_name_))) {
+        }
+      }
+    }
+  }
+  return ret;
+}
+
 // Set additional information for the temporary table
 int ObCreateTableResolver::set_temp_table_info(ObTableSchema &table_schema, ParseNode *commit_option_node)
 {
@@ -894,6 +955,10 @@ int ObCreateTableResolver::resolve_table_elements(const ParseNode *node,
           }
         }
       }
+    }
+
+    if (OB_SUCC(ret) && RESOLVE_NON_COL != resolve_rule
+        && OB_FAIL(add_ai_column_hidden_columns())) {
     }
 
     // A table must have at least one column as a visible column

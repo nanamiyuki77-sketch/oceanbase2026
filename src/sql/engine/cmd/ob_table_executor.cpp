@@ -39,6 +39,8 @@
 #include "sql/resolver/ddl/ob_optimize_stmt.h"
 #include "sql/resolver/dml/ob_delete_resolver.h"
 #include "sql/engine/cmd/ob_partition_executor_utils.h"
+#include "share/ob_dml_sql_splicer.h"
+#include "share/inner_table/ob_inner_table_schema_constants.h"
 
 #include "sql/printer/ob_select_stmt_printer.h"
 #include "share/ob_structured_event_logger.h"
@@ -50,6 +52,510 @@ using namespace share::schema;
 using namespace observer;
 namespace sql
 {
+
+static int register_ai_columns(ObSQLSessionInfo &session,
+                               const ObIArray<AIColumnDef *> &defs,
+                               const uint64_t table_id,
+                               const int64_t schema_version)
+{
+  int ret = OB_SUCCESS;
+  sqlclient::ObISQLConnection *conn = NULL;
+  sqlclient::ObISQLConnectionGuard conn_guard;
+  if (defs.empty()) {
+  } else if (OB_FAIL(query::ObInnerSQLConnectionAccess::
+                         create_spi_connection_with_external_session(&session, conn_guard))) {
+  } else if (OB_ISNULL(conn = conn_guard.get_ptr())) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (OB_FAIL(conn->start_transaction())) {
+  }
+
+  for (int64_t i = 0; OB_SUCC(ret) && i < defs.count(); ++i) {
+    AIColumnDef *def = defs.at(i);
+    ObDMLSqlSplicer dml;
+    ObSqlString sql;
+    ObSqlString metadata_table;
+    ObSqlString dependencies;
+    int64_t affected_rows = 0;
+    if (OB_ISNULL(def)) {
+      ret = OB_ERR_UNEXPECTED;
+    }
+    for (int64_t j = 0; OB_SUCC(ret) && j < def->dependency_names_.count(); ++j) {
+      if (j > 0 && OB_FAIL(dependencies.append(","))) {
+      } else if (OB_FAIL(dependencies.append(def->dependency_names_.at(j)))) {
+      }
+    }
+    if (OB_FAIL(ret)) {
+    } else if (OB_FAIL(dml.add_pk_column("table_id", table_id))) {
+    } else if (OB_FAIL(dml.add_pk_column("column_id", def->column_id_))) {
+    } else if (OB_FAIL(dml.add_column("column_name", ObHexEscapeSqlStr(def->column_name_)))) {
+    } else if (OB_FAIL(dml.add_column("max_retries", def->max_retries_))) {
+    } else if (OB_FAIL(dml.add_column("normalized_expr", ObHexEscapeSqlStr(def->normalized_expression_)))) {
+    } else if (OB_FAIL(dml.add_column("execution_expr", ObHexEscapeSqlStr(def->execution_expression_)))) {
+    } else if (OB_FAIL(dml.add_column("dependency_columns", ObHexEscapeSqlStr(dependencies.string())))) {
+    } else if (OB_FAIL(dml.add_column("state_column_id", def->state_column_id_))) {
+    } else if (OB_FAIL(dml.add_column("request_column_id", def->request_column_id_))) {
+    } else if (OB_FAIL(dml.add_column("result_spec_column_id", def->result_spec_column_id_))) {
+    } else if (OB_FAIL(dml.add_column("result_type", static_cast<int64_t>(def->result_type_)))) {
+    } else if (OB_FAIL(dml.add_column("vector_dimension", def->vector_dimension_))) {
+    } else if (OB_FAIL(dml.add_column("definition_version", schema_version))) {
+    } else if (OB_FAIL(metadata_table.append_fmt("%s.%s", OB_SYS_DATABASE_NAME,
+                                                OB_ALL_AI_COLUMN_TNAME))) {
+    } else if (OB_FAIL(dml.splice_insert_sql(metadata_table.ptr(), sql))) {
+    } else if (OB_FAIL(conn->execute_write(sql.ptr(), affected_rows))) {
+    } else if (1 != affected_rows) {
+      ret = OB_ERR_UNEXPECTED;
+    }
+  }
+
+  if (OB_NOT_NULL(conn)) {
+    if (OB_SUCC(ret)) {
+      int tmp_ret = conn->commit();
+      if (OB_SUCCESS != tmp_ret) {
+        ret = tmp_ret;
+      }
+    } else {
+      int tmp_ret = conn->rollback();
+      LOG_WARN_RET(tmp_ret, "failed to rollback AI column metadata transaction");
+    }
+  }
+  return ret;
+}
+
+static int append_ai_identifier(ObSqlString &sql, const ObString &name)
+{
+  int ret = OB_SUCCESS;
+  if (OB_FAIL(sql.append("`"))) {
+  }
+  for (int64_t i = 0; OB_SUCC(ret) && i < name.length(); ++i) {
+    if ('`' == name.ptr()[i] && OB_FAIL(sql.append("``"))) {
+    } else if ('`' != name.ptr()[i] && OB_FAIL(sql.append_fmt("%c", name.ptr()[i]))) {
+    }
+  }
+  if (OB_SUCC(ret) && OB_FAIL(sql.append("`"))) {
+  }
+  return ret;
+}
+
+static int append_ai_rowkey_expr(ObSqlString &sql,
+                                 const ObTableSchema &table_schema,
+                                 const char *row_alias)
+{
+  int ret = OB_SUCCESS;
+  bool first = true;
+  if (OB_FAIL(sql.append("CONCAT("))) {
+  }
+  for (ObTableSchema::const_column_iterator it = table_schema.column_begin();
+       OB_SUCC(ret) && it != table_schema.column_end(); ++it) {
+    const ObColumnSchemaV2 *col = *it;
+    if (OB_ISNULL(col)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (!col->is_rowkey_column()) {
+    } else {
+      if (!first && OB_FAIL(sql.append(", ' AND ', "))) {
+      } else if (OB_FAIL(sql.append_fmt("'`%.*s` = ', ",
+                                       col->get_column_name_str().length(),
+                                       col->get_column_name_str().ptr()))) {
+      } else if (ob_is_numeric_type(col->get_data_type())) {
+        if (OB_FAIL(sql.append_fmt("CAST(%s.", row_alias))) {
+        } else if (OB_FAIL(append_ai_identifier(sql, col->get_column_name_str()))) {
+        } else if (OB_FAIL(sql.append(" AS CHAR)"))) {
+        }
+      } else {
+        if (OB_FAIL(sql.append_fmt("QUOTE(%s.", row_alias))) {
+        } else if (OB_FAIL(append_ai_identifier(sql, col->get_column_name_str()))) {
+        } else if (OB_FAIL(sql.append(")"))) {
+        }
+      }
+      first = false;
+    }
+  }
+  if (OB_SUCC(ret) && first) {
+    ret = OB_NOT_SUPPORTED;
+    LOG_USER_ERROR(OB_NOT_SUPPORTED, "AI COLUMN on a table without a primary key is");
+  } else if (OB_SUCC(ret) && OB_FAIL(sql.append(")"))) {
+  }
+  return ret;
+}
+
+static int append_ai_dependency_change(ObSqlString &sql,
+                                       const ObTableSchema &table_schema,
+                                       const AIColumnDef &def)
+{
+  int ret = OB_SUCCESS;
+  bool first = true;
+  for (ObTableSchema::const_column_iterator it = table_schema.column_begin();
+       OB_SUCC(ret) && it != table_schema.column_end(); ++it) {
+    const ObColumnSchemaV2 *col = *it;
+    if (OB_ISNULL(col)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (col->is_rowkey_column()) {
+      if (!first && OB_FAIL(sql.append(" OR "))) {
+      } else if (OB_FAIL(sql.append("NOT (OLD."))) {
+      } else if (OB_FAIL(append_ai_identifier(sql, col->get_column_name_str()))) {
+      } else if (OB_FAIL(sql.append(" <=> NEW."))) {
+      } else if (OB_FAIL(append_ai_identifier(sql, col->get_column_name_str()))) {
+      } else if (OB_FAIL(sql.append(")"))) {
+      }
+      first = false;
+    }
+  }
+  for (int64_t i = 0; OB_SUCC(ret) && i < def.dependency_names_.count(); ++i) {
+    if (!first && OB_FAIL(sql.append(" OR "))) {
+    } else if (OB_FAIL(sql.append("NOT (OLD."))) {
+    } else if (OB_FAIL(append_ai_identifier(sql, def.dependency_names_.at(i)))) {
+    } else if (OB_FAIL(sql.append(" <=> NEW."))) {
+    } else if (OB_FAIL(append_ai_identifier(sql, def.dependency_names_.at(i)))) {
+    } else if (OB_FAIL(sql.append(")"))) {
+    }
+    first = false;
+  }
+  return ret;
+}
+
+static int append_ai_task_insert(ObSqlString &sql,
+                                 const AIColumnDef &def,
+                                 const ObTableSchema &table_schema,
+                                 const int64_t schema_version,
+                                 const char *row_alias,
+                                 const char *request_expr)
+{
+  int ret = OB_SUCCESS;
+  if (OB_FAIL(sql.append_fmt(
+      " INSERT INTO %s.%s(task_id, table_id, column_id, rowkey_predicate, eligible_ts, "
+      "request_id, state, retry_count, max_retries, definition_version) VALUES "
+      "(UUID_SHORT(), %lu, %lu, ", OB_SYS_DATABASE_NAME, OB_ALL_AI_COLUMN_TASK_TNAME,
+      table_schema.get_table_id(), def.column_id_))) {
+  } else if (OB_FAIL(append_ai_rowkey_expr(sql, table_schema, row_alias))) {
+  } else if (OB_FAIL(sql.append_fmt(", NOW(6), %s, 0, 0, %ld, %ld);",
+                                    request_expr, def.max_retries_, schema_version))) {
+  }
+  return ret;
+}
+
+static int install_ai_column_triggers(const ObIArray<AIColumnDef *> &defs,
+                                      const ObString &database_name,
+                                      const ObString &table_name,
+                                      const ObTableSchema &table_schema,
+                                      const int64_t schema_version)
+{
+  int ret = OB_SUCCESS;
+  ObMySQLProxy *proxy = GCTX.sql_proxy_;
+  ObSqlString sql;
+  int64_t affected_rows = 0;
+  if (defs.empty()) {
+    return OB_SUCCESS;
+  } else if (OB_ISNULL(proxy)) {
+    ret = OB_ERR_UNEXPECTED;
+  }
+
+  if (OB_SUCC(ret)) {
+    OZ(sql.append("CREATE TRIGGER "));
+    OZ(append_ai_identifier(sql, database_name));
+    OZ(sql.append_fmt(".`__ai_%lu_bi` BEFORE INSERT ON ", table_schema.get_table_id()));
+    OZ(append_ai_identifier(sql, database_name));
+    OZ(sql.append("."));
+    OZ(append_ai_identifier(sql, table_name));
+    OZ(sql.append(" FOR EACH ROW BEGIN"));
+    for (int64_t i = 0; OB_SUCC(ret) && i < defs.count(); ++i) {
+      AIColumnDef *def = defs.at(i);
+      CK(OB_NOT_NULL(def));
+      OZ(sql.append(" IF NEW."));
+      OZ(append_ai_identifier(sql, def->column_name_));
+      OZ(sql.append(" IS NOT NULL THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'AI column is read only'; END IF;"));
+    }
+    OZ(sql.append(" END"));
+    OZ(proxy->write(sql.ptr(), affected_rows));
+  }
+
+  if (OB_SUCC(ret)) {
+    sql.reset();
+    OZ(sql.append("CREATE TRIGGER "));
+    OZ(append_ai_identifier(sql, database_name));
+    OZ(sql.append_fmt(".`__ai_%lu_bu` BEFORE UPDATE ON ", table_schema.get_table_id()));
+    OZ(append_ai_identifier(sql, database_name));
+    OZ(sql.append("."));
+    OZ(append_ai_identifier(sql, table_name));
+    OZ(sql.append(" FOR EACH ROW BEGIN"));
+    for (int64_t i = 0; OB_SUCC(ret) && i < defs.count(); ++i) {
+      AIColumnDef *def = defs.at(i);
+      CK(OB_NOT_NULL(def));
+      OZ(sql.append(" IF "));
+      OZ(append_ai_dependency_change(sql, table_schema, *def));
+      OZ(sql.append(" THEN SET NEW."));
+      OZ(append_ai_identifier(sql, def->column_name_));
+      OZ(sql.append(" = NULL; END IF;"));
+    }
+    OZ(sql.append(" END"));
+    OZ(proxy->write(sql.ptr(), affected_rows));
+  }
+
+  if (OB_SUCC(ret)) {
+    sql.reset();
+    OZ(sql.append("CREATE TRIGGER "));
+    OZ(append_ai_identifier(sql, database_name));
+    OZ(sql.append_fmt(".`__ai_%lu_au` AFTER UPDATE ON ", table_schema.get_table_id()));
+    OZ(append_ai_identifier(sql, database_name));
+    OZ(sql.append("."));
+    OZ(append_ai_identifier(sql, table_name));
+    OZ(sql.append(" FOR EACH ROW BEGIN DECLARE ai_request VARCHAR(64); SET ai_request = UUID();"));
+    for (int64_t i = 0; OB_SUCC(ret) && i < defs.count(); ++i) {
+      AIColumnDef *def = defs.at(i);
+      CK(OB_NOT_NULL(def));
+      OZ(sql.append(" IF "));
+      OZ(append_ai_dependency_change(sql, table_schema, *def));
+      OZ(sql.append_fmt(" THEN DELETE FROM %s.%s WHERE table_id = %lu AND column_id = %lu AND rowkey_predicate = ",
+                        OB_SYS_DATABASE_NAME, OB_ALL_AI_COLUMN_TASK_TNAME,
+                        table_schema.get_table_id(), def->column_id_));
+      OZ(append_ai_rowkey_expr(sql, table_schema, "OLD"));
+      OZ(sql.append(";"));
+      OZ(append_ai_task_insert(sql, *def, table_schema, schema_version, "NEW", "ai_request"));
+      OZ(sql.append(" END IF;"));
+    }
+    OZ(sql.append(" END"));
+    OZ(proxy->write(sql.ptr(), affected_rows));
+  }
+
+  if (OB_SUCC(ret)) {
+    sql.reset();
+    OZ(sql.append("CREATE TRIGGER "));
+    OZ(append_ai_identifier(sql, database_name));
+    OZ(sql.append_fmt(".`__ai_%lu_ai` AFTER INSERT ON ", table_schema.get_table_id()));
+    OZ(append_ai_identifier(sql, database_name));
+    OZ(sql.append("."));
+    OZ(append_ai_identifier(sql, table_name));
+    OZ(sql.append(" FOR EACH ROW BEGIN DECLARE ai_request VARCHAR(64); SET ai_request = UUID();"));
+    for (int64_t i = 0; OB_SUCC(ret) && i < defs.count(); ++i) {
+      CK(OB_NOT_NULL(defs.at(i)));
+      OZ(append_ai_task_insert(sql, *defs.at(i), table_schema, schema_version, "NEW", "ai_request"));
+    }
+    OZ(sql.append(" END"));
+    OZ(proxy->write(sql.ptr(), affected_rows));
+  }
+
+  if (OB_SUCC(ret)) {
+    sql.reset();
+    OZ(sql.append("CREATE TRIGGER "));
+    OZ(append_ai_identifier(sql, database_name));
+    OZ(sql.append_fmt(".`__ai_%lu_ad` AFTER DELETE ON ", table_schema.get_table_id()));
+    OZ(append_ai_identifier(sql, database_name));
+    OZ(sql.append("."));
+    OZ(append_ai_identifier(sql, table_name));
+    OZ(sql.append_fmt(" FOR EACH ROW BEGIN DELETE FROM %s.%s WHERE table_id = %lu AND rowkey_predicate = ",
+                      OB_SYS_DATABASE_NAME, OB_ALL_AI_COLUMN_TASK_TNAME, table_schema.get_table_id()));
+    OZ(append_ai_rowkey_expr(sql, table_schema, "OLD"));
+    OZ(sql.append("; END"));
+    OZ(proxy->write(sql.ptr(), affected_rows));
+  }
+  return ret;
+}
+
+static bool is_ai_retry_ident_char(const char c)
+{
+  return ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z') ||
+         ('0' <= c && c <= '9') || '_' == c || '$' == c;
+}
+
+static int extract_ai_retry_predicate(const ObString &stmt, ObString &predicate)
+{
+  int ret = OB_SUCCESS;
+  int64_t where_pos = -1;
+  char quote = 0;
+  for (int64_t i = 0; i + 5 <= stmt.length() && where_pos < 0; ++i) {
+    const char c = stmt.ptr()[i];
+    if (0 != quote) {
+      if ('\\' == c) {
+        ++i;
+      } else if (quote == c) {
+        if (i + 1 < stmt.length() && stmt.ptr()[i + 1] == quote) {
+          ++i;
+        } else {
+          quote = 0;
+        }
+      }
+    } else if ('\'' == c || '"' == c || '`' == c) {
+      quote = c;
+    } else if ((0 == i || !is_ai_retry_ident_char(stmt.ptr()[i - 1])) &&
+               (i + 5 == stmt.length() || !is_ai_retry_ident_char(stmt.ptr()[i + 5])) &&
+               0 == strncasecmp(stmt.ptr() + i, "where", 5)) {
+      where_pos = i + 5;
+    }
+  }
+  if (where_pos < 0) {
+    predicate = ObString::make_string("1=1");
+  } else {
+    while (where_pos < stmt.length() && isspace(stmt.ptr()[where_pos])) {
+      ++where_pos;
+    }
+    int64_t end = stmt.length();
+    while (end > where_pos && (isspace(stmt.ptr()[end - 1]) || ';' == stmt.ptr()[end - 1])) {
+      --end;
+    }
+    if (end <= where_pos) {
+      ret = OB_ERR_PARSE_SQL;
+    } else {
+      predicate.assign_ptr(stmt.ptr() + where_pos, end - where_pos);
+    }
+  }
+  return ret;
+}
+
+static int rewrite_ai_retry_status(const ObString &predicate,
+                                   const ObString &status_expr,
+                                   ObSqlString &rewritten)
+{
+  int ret = OB_SUCCESS;
+  for (int64_t i = 0; OB_SUCC(ret) && i < predicate.length();) {
+    const char c = predicate.ptr()[i];
+    if ('\'' == c || '"' == c || '`' == c) {
+      const char quote = c;
+      OZ(rewritten.append_fmt("%c", c));
+      ++i;
+      while (OB_SUCC(ret) && i < predicate.length()) {
+        const char qc = predicate.ptr()[i++];
+        OZ(rewritten.append_fmt("%c", qc));
+        if ('\\' == qc && i < predicate.length()) {
+          OZ(rewritten.append_fmt("%c", predicate.ptr()[i++]));
+        } else if (quote == qc) {
+          if (i < predicate.length() && predicate.ptr()[i] == quote) {
+            OZ(rewritten.append_fmt("%c", predicate.ptr()[i++]));
+          } else {
+            break;
+          }
+        }
+      }
+    } else if (is_ai_retry_ident_char(c) && !('0' <= c && c <= '9')) {
+      const int64_t begin = i++;
+      while (i < predicate.length() && is_ai_retry_ident_char(predicate.ptr()[i])) {
+        ++i;
+      }
+      ObString token(i - begin, predicate.ptr() + begin);
+      if (0 == token.case_compare("status")) {
+        OZ(rewritten.append(status_expr));
+      } else {
+        OZ(rewritten.append(token));
+      }
+    } else {
+      OZ(rewritten.append_fmt("%c", c));
+      ++i;
+    }
+  }
+  return ret;
+}
+
+static int append_ai_hex_literal(ObSqlString &sql, const ObString &value)
+{
+  static const char HEX[] = "0123456789ABCDEF";
+  int ret = sql.append("0x");
+  for (int64_t i = 0; OB_SUCC(ret) && i < value.length(); ++i) {
+    const unsigned char c = static_cast<unsigned char>(value.ptr()[i]);
+    OZ(sql.append_fmt("%c%c", HEX[c >> 4], HEX[c & 0x0F]));
+  }
+  return ret;
+}
+
+static int execute_ai_column_retry(ObAlterTableStmt &stmt)
+{
+  int ret = OB_SUCCESS;
+  ObMySQLProxy *proxy = GCTX.sql_proxy_;
+  const uint64_t table_id = stmt.get_alter_table_arg().alter_table_schema_.get_table_id();
+  const ObString &column_name = stmt.get_ai_retry_column_name();
+  const ObString &rowkey_expr = stmt.get_ai_retry_rowkey_expr();
+  int64_t column_id = OB_INVALID_ID;
+  int64_t max_retries = 0;
+  int64_t definition_version = 0;
+  ObSqlString sql;
+  if (OB_ISNULL(proxy)) {
+    ret = OB_NOT_INIT;
+  } else {
+    OZ(sql.append_fmt("SELECT column_id, max_retries, definition_version FROM %s.%s "
+                      "WHERE table_id=%lu AND column_name=",
+                      OB_SYS_DATABASE_NAME, OB_ALL_AI_COLUMN_TNAME, table_id));
+    OZ(append_ai_hex_literal(sql, column_name));
+  }
+  if (OB_SUCC(ret)) {
+    SMART_VAR(ObMySQLProxy::MySQLResult, res) {
+      sqlclient::ObMySQLResult *result = NULL;
+      if (OB_FAIL(proxy->read(res, sql.ptr()))) {
+      } else if (OB_ISNULL(result = res.get_result())) {
+        ret = OB_ERR_UNEXPECTED;
+      } else if (OB_FAIL(result->next())) {
+        if (OB_ITER_END == ret) {
+          ret = OB_NOT_SUPPORTED;
+          LOG_USER_ERROR(OB_NOT_SUPPORTED, "retrying a column that is not an AI column");
+        }
+      } else {
+        EXTRACT_INT_FIELD_MYSQL(*result, "column_id", column_id, int64_t);
+        EXTRACT_INT_FIELD_MYSQL(*result, "max_retries", max_retries, int64_t);
+        EXTRACT_INT_FIELD_MYSQL(*result, "definition_version", definition_version, int64_t);
+      }
+    }
+  }
+
+  ObString first_stmt;
+  ObString raw_predicate;
+  ObSqlString status_expr;
+  ObSqlString predicate;
+  if (OB_SUCC(ret)) {
+    OZ(stmt.get_first_stmt(first_stmt));
+    OZ(extract_ai_retry_predicate(first_stmt, raw_predicate));
+    OZ(status_expr.append("(CASE WHEN "));
+    OZ(append_ai_identifier(status_expr, column_name));
+    OZ(status_expr.append_fmt(" IS NOT NULL THEN 'READY' WHEN EXISTS (SELECT 1 FROM %s.%s task "
+                              "WHERE task.table_id=%lu AND task.column_id=%ld "
+                              "AND task.rowkey_predicate=",
+                              OB_SYS_DATABASE_NAME, OB_ALL_AI_COLUMN_TASK_TNAME,
+                              table_id, column_id));
+    OZ(status_expr.append(rowkey_expr));
+    OZ(status_expr.append(") THEN 'PENDING' ELSE 'FAILED' END)"));
+    OZ(rewrite_ai_retry_status(raw_predicate, status_expr.string(), predicate));
+  }
+
+  ObMySQLTransaction trans;
+  int64_t affected_rows = 0;
+  if (OB_SUCC(ret)) {
+    OZ(trans.start(proxy));
+    sql.reset();
+    OZ(sql.append_fmt("INSERT INTO %s.%s(task_id, table_id, column_id, rowkey_predicate, "
+                      "eligible_ts, request_id, state, retry_count, max_retries, definition_version) "
+                      "SELECT UUID_SHORT(), %lu, %ld, ",
+                      OB_SYS_DATABASE_NAME, OB_ALL_AI_COLUMN_TASK_TNAME,
+                      table_id, column_id));
+    OZ(sql.append(rowkey_expr));
+    OZ(sql.append_fmt(", NOW(6), UUID(), 0, 0, %ld, %ld FROM ",
+                      max_retries, definition_version));
+    OZ(append_ai_identifier(sql, stmt.get_org_database_name()));
+    OZ(sql.append("."));
+    OZ(append_ai_identifier(sql, stmt.get_org_table_name()));
+    OZ(sql.append(" WHERE "));
+    OZ(sql.append(predicate.string()));
+    OZ(sql.append_fmt(" AND NOT EXISTS (SELECT 1 FROM %s.%s task WHERE task.table_id=%lu "
+                      "AND task.column_id=%ld AND task.rowkey_predicate=",
+                      OB_SYS_DATABASE_NAME, OB_ALL_AI_COLUMN_TASK_TNAME,
+                      table_id, column_id));
+    OZ(sql.append(rowkey_expr));
+    OZ(sql.append(")"));
+    OZ(trans.write(sql.ptr(), affected_rows));
+  }
+  if (OB_SUCC(ret)) {
+    sql.reset();
+    OZ(sql.append("UPDATE "));
+    OZ(append_ai_identifier(sql, stmt.get_org_database_name()));
+    OZ(sql.append("."));
+    OZ(append_ai_identifier(sql, stmt.get_org_table_name()));
+    OZ(sql.append(" SET "));
+    OZ(append_ai_identifier(sql, column_name));
+    OZ(sql.append("=NULL WHERE "));
+    OZ(sql.append(predicate.string()));
+    OZ(trans.write(sql.ptr(), affected_rows));
+  }
+  if (trans.is_started()) {
+    const int end_ret = trans.end(OB_SUCC(ret));
+    if (OB_SUCC(ret) && OB_SUCCESS != end_ret) {
+      ret = end_ret;
+    }
+  }
+  return ret;
+}
 
 ObCreateTableExecutor::ObCreateTableExecutor()
 {
@@ -448,7 +954,7 @@ int ObCreateTableExecutor::execute(ObExecContext &ctx, ObCreateTableStmt &stmt)
   obcall::ObCreateTableArg &create_table_arg = stmt.get_create_table_arg();
   ObString first_stmt;
   ObSelectStmt *select_stmt = stmt.get_sub_select();
-  const ObTableSchema &table_schema = create_table_arg.schema_;
+  ObTableSchema &table_schema = create_table_arg.schema_;
   ObSQLSessionInfo *my_session = ctx.get_my_session();
   
   if (OB_ISNULL(my_session)) {
@@ -486,6 +992,12 @@ int ObCreateTableExecutor::execute(ObExecContext &ctx, ObCreateTableStmt &stmt)
         if (OB_FAIL(ObDDLExecutorUtil::execute_pcreate_table(
             my_session, ctx.root_command_service(), "[parallel create table]",
                                                           create_table_arg, res))) {
+        } else if (OB_FAIL(register_ai_columns(*my_session, stmt.get_ai_column_defs(),
+                                               res.table_id_, res.schema_version_))) {
+        } else if (FALSE_IT(table_schema.set_table_id(res.table_id_))) {
+        } else if (OB_FAIL(install_ai_column_triggers(stmt.get_ai_column_defs(),
+                                                     stmt.get_database_name(), stmt.get_table_name(),
+                                                     table_schema, res.schema_version_))) {
         }
       }
     } else {
@@ -762,6 +1274,8 @@ int ObAlterTableExecutor::execute(ObExecContext &ctx, ObAlterTableStmt &stmt)
   OV (OB_NOT_NULL(task_exec_ctx = GET_SQL_EXECUTOR_CTX(ctx)), OB_NOT_INIT);
   if (OB_FAIL(ret)) {
     // do nothing
+  } else if (stmt.is_ai_column_retry()) {
+    ret = execute_ai_column_retry(stmt);
   } else if (stmt.is_alter_triggers()) {
     if (stmt.get_tg_arg().trigger_infos_.count() > 0) {
       stmt.get_tg_arg().ddl_stmt_str_ = first_stmt;
@@ -865,6 +1379,46 @@ int ObAlterTableExecutor::execute(ObExecContext &ctx, ObAlterTableStmt &stmt)
             res.task_id_, res.ddl_need_retry_at_executor_, my_session,
             *ctx.get_query_runtime_environment(), ctx.local_command_service(), is_support_cancel))) {
         }
+      }
+    }
+    if (OB_SUCC(ret) && !stmt.get_ai_column_defs().empty()) {
+      const uint64_t table_id = alter_table_arg.alter_table_schema_.get_table_id();
+      const ObTableSchema *table_schema = NULL;
+      SMART_VAR(ObSchemaGetterGuard, guard) {
+        if (OB_FAIL(refresh_schema_for_table())) {
+        } else if (OB_FAIL(ObMultiVersionSchemaService::get_instance().get_runtime_schema_guard(guard))) {
+        } else if (OB_FAIL(guard.get_table_schema(table_id, table_schema))) {
+        } else if (OB_ISNULL(table_schema)) {
+          ret = OB_TABLE_NOT_EXIST;
+        }
+        for (int64_t i = 0; OB_SUCC(ret) && i < stmt.get_ai_column_defs().count(); ++i) {
+          AIColumnDef *def = stmt.get_ai_column_defs().at(i);
+          const ObColumnSchemaV2 *result_col = NULL;
+          const ObColumnSchemaV2 *state_col = NULL;
+          const ObColumnSchemaV2 *request_col = NULL;
+          const ObColumnSchemaV2 *result_spec_col = NULL;
+          if (OB_ISNULL(def)
+              || OB_ISNULL(result_col = table_schema->get_column_schema(def->column_name_))
+              || OB_ISNULL(state_col = table_schema->get_column_schema(def->state_column_name_))
+              || OB_ISNULL(request_col = table_schema->get_column_schema(def->request_column_name_))
+              || OB_ISNULL(result_spec_col = table_schema->get_column_schema(def->result_spec_column_name_))) {
+            ret = OB_ERR_UNEXPECTED;
+          } else {
+            def->column_id_ = result_col->get_column_id();
+            def->state_column_id_ = state_col->get_column_id();
+            def->request_column_id_ = request_col->get_column_id();
+            def->result_spec_column_id_ = result_spec_col->get_column_id();
+          }
+        }
+      }
+      if (OB_SUCC(ret)) {
+        ret = register_ai_columns(*my_session, stmt.get_ai_column_defs(),
+                                  table_id, res.schema_version_);
+      }
+      if (OB_SUCC(ret)) {
+        ret = install_ai_column_triggers(stmt.get_ai_column_defs(),
+                                         stmt.get_org_database_name(), stmt.get_org_table_name(),
+                                         *table_schema, res.schema_version_);
       }
     }
     char table_info_buffer[256];

@@ -107,6 +107,7 @@ int ObExprAIComplete::eval_ai_complete(const ObExpr &expr,
     ObString prompt;
     ObJsonObject *config = nullptr;
     ObString config_str;
+    ObString system_prompt;
     share::ObAiModelEndpointInfo resolved_endpoint;
     const share::ObAiModelEndpointInfo *endpoint_info = &resolved_endpoint;
     query::ObIAiEndpointResolver *endpoint_resolver =
@@ -138,6 +139,13 @@ int ObExprAIComplete::eval_ai_complete(const ObExpr &expr,
         LOG_WARN("failed to read ai completion config", K(ret));
       } else if (OB_FAIL(ObAIFuncJsonUtils::get_json_object_form_str(temp_allocator, config_str, config))) {
         LOG_WARN("failed to parse ai completion config", K(ret));
+      } else if (ObJsonNode *node = config->get_value("__ai_column_system_prompt")) {
+        if (node->json_type() != ObJsonNodeType::J_STRING) {
+          ret = OB_INVALID_ARGUMENT;
+        } else {
+          system_prompt = static_cast<ObJsonString *>(node)->get_str();
+          ret = config->remove("__ai_column_system_prompt");
+        }
       }
     }
     if (OB_FAIL(ret)) {
@@ -158,7 +166,7 @@ int ObExprAIComplete::eval_ai_complete(const ObExpr &expr,
     } else {
       ObAIFuncModel model(temp_allocator, *info, *endpoint_info);
       ObString result;
-      if (OB_FAIL(model.call_completion(prompt, config, result))) {
+      if (OB_FAIL(model.call_completion(prompt, config, result, system_prompt))) {
         LOG_WARN("failed to call ai completion model", K(ret));
       } else if (OB_FAIL(ObAIFuncUtils::set_string_result(expr, ctx, res, result))) {
         LOG_WARN("failed to set ai completion result", K(ret));

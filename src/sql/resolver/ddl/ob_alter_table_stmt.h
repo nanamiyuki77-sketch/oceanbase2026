@@ -54,6 +54,17 @@ public:
   bool is_alter_triggers() const { return is_alter_triggers_; }
   void set_is_alter_triggers(const bool flag) { is_alter_triggers_ = flag; }
 
+  bool is_ai_column_retry() const { return is_ai_column_retry_; }
+  void set_ai_column_retry(const common::ObString &column_name,
+                           const common::ObString &rowkey_expr)
+  {
+    is_ai_column_retry_ = true;
+    ai_retry_column_name_ = column_name;
+    ai_retry_rowkey_expr_ = rowkey_expr;
+  }
+  const common::ObString &get_ai_retry_column_name() const { return ai_retry_column_name_; }
+  const common::ObString &get_ai_retry_rowkey_expr() const { return ai_retry_rowkey_expr_; }
+
   int set_origin_database_name(const common::ObString &origin_db_name);
   int set_origin_table_name(const common::ObString &origin_table_name);
   void set_table_id(const uint64_t table_id);
@@ -111,6 +122,9 @@ private:
   common::ObSArray<obcall::ObCreateIndexArg*> index_arg_list_;
   common::ObIAllocator *fts_arg_allocator_;
   bool is_alter_triggers_;
+  bool is_ai_column_retry_;
+  common::ObString ai_retry_column_name_;
+  common::ObString ai_retry_rowkey_expr_;
   obcall::ObAlterTriggerArg tg_arg_;
   uint64_t alter_table_action_count_;
   obcall::ObExchangePartitionArg exchange_partition_arg_;

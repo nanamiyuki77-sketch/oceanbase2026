@@ -27,6 +27,8 @@
 #include "sql/monitor/show_trace/ob_show_trace.h"
 #include "sql/engine/table/ob_table_scan_op.h"
 #include "share/ob_ddl_checksum.h"
+#include "share/inner_table/ob_inner_table_schema_constants.h"
+#include "query/session/ob_inner_sql_connection_access.h"
 
 using namespace oceanbase::sql;
 using namespace oceanbase::common;
@@ -54,6 +56,191 @@ int find_table_scan_table_id(const ObOpSpec *spec, uint64_t &table_id)
       }
     }
   }
+  return ret;
+}
+
+int collect_table_scan_table_ids(const ObOpSpec *spec, ObIArray<uint64_t> &table_ids)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(spec)) {
+    ret = OB_INVALID_ARGUMENT;
+  } else {
+    if (spec->is_table_scan()) {
+      const uint64_t table_id = static_cast<const ObTableScanSpec *>(spec)->get_ref_table_id();
+      bool found = false;
+      for (int64_t i = 0; !found && i < table_ids.count(); ++i) {
+        found = table_id == table_ids.at(i);
+      }
+      if (!found && OB_FAIL(table_ids.push_back(table_id))) {
+      }
+    }
+    for (uint32_t i = 0; OB_SUCC(ret) && i < spec->get_child_cnt(); ++i) {
+      OZ(SMART_CALL(collect_table_scan_table_ids(spec->get_child(i), table_ids)));
+    }
+  }
+  return ret;
+}
+
+bool ai_strict_contains_identifier(const ObString &sql, const ObString &name)
+{
+  bool found = false;
+  for (int64_t i = 0; !found && i < sql.length();) {
+    const char c = sql.ptr()[i];
+    if ('\'' == c || '"' == c) {
+      const char quote = c;
+      for (++i; i < sql.length();) {
+        const char qc = sql.ptr()[i++];
+        if ('\\' == qc && i < sql.length()) {
+          ++i;
+        } else if (quote == qc) {
+          if (i < sql.length() && sql.ptr()[i] == quote) {
+            ++i;
+          } else {
+            break;
+          }
+        }
+      }
+    } else if ('/' == c && i + 1 < sql.length() && '*' == sql.ptr()[i + 1]) {
+      i += 2;
+      while (i + 1 < sql.length() && !('*' == sql.ptr()[i] && '/' == sql.ptr()[i + 1])) {
+        ++i;
+      }
+      i = i + 2 < sql.length() ? i + 2 : sql.length();
+    } else if (('#' == c) || ('-' == c && i + 2 < sql.length() && '-' == sql.ptr()[i + 1]
+                              && isspace(sql.ptr()[i + 2]))) {
+      while (i < sql.length() && '\n' != sql.ptr()[i]) {
+        ++i;
+      }
+    } else if ('`' == c) {
+      const int64_t begin = ++i;
+      while (i < sql.length() && '`' != sql.ptr()[i]) {
+        ++i;
+      }
+      found = ObString(i - begin, sql.ptr() + begin).case_compare(name) == 0;
+      i += i < sql.length();
+    } else if (isalnum(c) || '_' == c || '$' == c) {
+      const int64_t begin = i++;
+      while (i < sql.length()
+             && (isalnum(sql.ptr()[i]) || '_' == sql.ptr()[i] || '$' == sql.ptr()[i])) {
+        ++i;
+      }
+      found = ObString(i - begin, sql.ptr() + begin).case_compare(name) == 0;
+    } else {
+      ++i;
+    }
+  }
+  return found;
+}
+
+int append_ai_strict_identifier(ObSqlString &sql, const ObString &identifier)
+{
+  int ret = sql.append("`");
+  for (int64_t i = 0; OB_SUCC(ret) && i < identifier.length(); ++i) {
+    if ('`' == identifier.ptr()[i]) {
+      OZ(sql.append("``"));
+    } else {
+      OZ(sql.append_fmt("%c", identifier.ptr()[i]));
+    }
+  }
+  OZ(sql.append("`"));
+  return ret;
+}
+
+struct AIColumnStrictRef
+{
+  uint64_t table_id_;
+  uint64_t column_id_;
+  ObString database_name_;
+  ObString table_name_;
+  ObString column_name_;
+};
+
+int check_ai_column_strict_read(ObSQLSessionInfo &session, const ObPhysicalPlan &plan)
+{
+  int ret = OB_SUCCESS;
+  ObSEArray<uint64_t, 4> table_ids;
+  ObSEArray<AIColumnStrictRef, 4> columns;
+  ObArenaAllocator allocator("AIStrictRead");
+  ObString query;
+  sqlclient::ObISQLConnectionGuard conn_guard;
+  sqlclient::ObISQLConnection *conn = NULL;
+  if (OB_FAIL(collect_table_scan_table_ids(plan.get_root_op_spec(), table_ids))) {
+  } else if (table_ids.empty()) {
+  } else if (OB_FAIL(ob_write_string(allocator, session.get_current_query_string(), query))) {
+  } else if (OB_FAIL(query::ObInnerSQLConnectionAccess::
+                         create_spi_connection_with_external_session(&session, conn_guard))) {
+  } else if (OB_ISNULL(conn = conn_guard.get_ptr())) {
+    ret = OB_ERR_UNEXPECTED;
+  }
+
+  for (int64_t i = 0; OB_SUCC(ret) && i < table_ids.count(); ++i) {
+    ObSqlString sql;
+    OZ(sql.assign_fmt("SELECT ai.column_id, ai.column_name, t.table_name, d.database_name "
+                      "FROM %s.%s ai JOIN %s.__all_table t ON t.table_id=ai.table_id "
+                      "JOIN %s.__all_database d ON d.database_id=t.database_id "
+                      "WHERE ai.table_id=%lu",
+                      OB_SYS_DATABASE_NAME, OB_ALL_AI_COLUMN_TNAME,
+                      OB_SYS_DATABASE_NAME, OB_SYS_DATABASE_NAME, table_ids.at(i)));
+    if (OB_SUCC(ret)) {
+      SMART_VAR(ObMySQLProxy::MySQLResult, result) {
+        if (OB_FAIL(conn->execute_read(sql.string(), result))) {
+        } else if (OB_ISNULL(result.get_result())) {
+          ret = OB_ERR_UNEXPECTED;
+        } else {
+          int next_ret = OB_SUCCESS;
+          while (OB_SUCC(ret) && OB_SUCCESS == (next_ret = result.get_result()->next())) {
+            AIColumnStrictRef ref;
+            ObString column_name;
+            ObString table_name;
+            ObString database_name;
+            ref.table_id_ = table_ids.at(i);
+            EXTRACT_INT_FIELD_MYSQL(*result.get_result(), "column_id", ref.column_id_, uint64_t);
+            EXTRACT_VARCHAR_FIELD_MYSQL(*result.get_result(), "column_name", column_name);
+            EXTRACT_VARCHAR_FIELD_MYSQL(*result.get_result(), "table_name", table_name);
+            EXTRACT_VARCHAR_FIELD_MYSQL(*result.get_result(), "database_name", database_name);
+            OZ(ob_write_string(allocator, column_name, ref.column_name_));
+            OZ(ob_write_string(allocator, table_name, ref.table_name_));
+            OZ(ob_write_string(allocator, database_name, ref.database_name_));
+            OZ(columns.push_back(ref));
+          }
+          if (OB_SUCC(ret) && OB_ITER_END != next_ret) {
+            ret = next_ret;
+          }
+        }
+      }
+    }
+  }
+
+  for (int64_t i = 0; OB_SUCC(ret) && i < columns.count(); ++i) {
+    const AIColumnStrictRef &ref = columns.at(i);
+    if (ai_strict_contains_identifier(query, ref.column_name_)) {
+      ObSqlString sql;
+      OZ(sql.append("SELECT 1 FROM "));
+      OZ(append_ai_strict_identifier(sql, ref.database_name_));
+      OZ(sql.append("."));
+      OZ(append_ai_strict_identifier(sql, ref.table_name_));
+      OZ(sql.append(" WHERE "));
+      OZ(append_ai_strict_identifier(sql, ref.column_name_));
+      OZ(sql.append(" IS NULL LIMIT 1"));
+      if (OB_SUCC(ret)) {
+        SMART_VAR(ObMySQLProxy::MySQLResult, result) {
+          if (OB_FAIL(conn->execute_read(sql.string(), result))) {
+          } else if (OB_ISNULL(result.get_result())) {
+            ret = OB_ERR_UNEXPECTED;
+          } else {
+            const int next_ret = result.get_result()->next();
+            if (OB_SUCCESS == next_ret) {
+              ret = OB_AI_COLUMN_NOT_READY;
+              LOG_USER_ERROR(OB_AI_COLUMN_NOT_READY, ref.table_id_, ref.column_id_);
+            } else if (OB_ITER_END != next_ret) {
+              ret = next_ret;
+            }
+          }
+        }
+      }
+    }
+  }
+
   return ret;
 }
 }
@@ -197,7 +384,15 @@ int ObResultSet::execute()
 //  if (stmt::T_PREPARE != stmt_type_
 //      && stmt::T_DEALLOCATE != stmt_type_) {
     if (NULL != physical_plan_) {
-      ret = open_plan();
+      int64_t strict_read = 0;
+      if (!is_inner_result_set_ && is_user_sql_
+          && (stmt::T_SELECT == stmt_type_ || stmt::T_UPDATE == stmt_type_ || stmt::T_DELETE == stmt_type_)
+          && OB_FAIL(my_session_.get_sys_variable_by_name(
+                         ObString::make_string("ai_column_strict_read"), strict_read))) {
+      } else if (0 != strict_read && OB_FAIL(check_ai_column_strict_read(my_session_, *physical_plan_))) {
+      } else {
+        ret = open_plan();
+      }
     } else if (NULL != cmd_) {
       ret = open_cmd();
     } else {

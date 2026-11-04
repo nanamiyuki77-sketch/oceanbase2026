@@ -35,6 +35,54 @@ using namespace common;
 using namespace obcall;
 namespace sql
 {
+static int append_ai_retry_identifier(ObSqlString &sql, const ObString &name)
+{
+  int ret = sql.append("`");
+  for (int64_t i = 0; OB_SUCC(ret) && i < name.length(); ++i) {
+    if ('`' == name.ptr()[i]) {
+      OZ(sql.append("``"));
+    } else {
+      OZ(sql.append_fmt("%c", name.ptr()[i]));
+    }
+  }
+  OZ(sql.append("`"));
+  return ret;
+}
+
+static int build_ai_retry_rowkey_expr(const ObTableSchema &table_schema, ObSqlString &sql)
+{
+  int ret = sql.append("CONCAT(");
+  bool first = true;
+  for (ObTableSchema::const_column_iterator it = table_schema.column_begin();
+       OB_SUCC(ret) && it != table_schema.column_end(); ++it) {
+    const ObColumnSchemaV2 *column = *it;
+    if (OB_ISNULL(column)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (!column->is_rowkey_column()) {
+    } else {
+      OZ(first ? OB_SUCCESS : sql.append(", ' AND ', "));
+      OZ(sql.append_fmt("'`%.*s` = ', ", column->get_column_name_str().length(),
+                        column->get_column_name_str().ptr()));
+      if (ob_is_numeric_type(column->get_data_type())) {
+        OZ(sql.append("CAST("));
+        OZ(append_ai_retry_identifier(sql, column->get_column_name_str()));
+        OZ(sql.append(" AS CHAR)"));
+      } else {
+        OZ(sql.append("QUOTE("));
+        OZ(append_ai_retry_identifier(sql, column->get_column_name_str()));
+        OZ(sql.append(")"));
+      }
+      first = false;
+    }
+  }
+  if (OB_SUCC(ret) && first) {
+    ret = OB_NOT_SUPPORTED;
+    LOG_USER_ERROR(OB_NOT_SUPPORTED, "AI COLUMN on a table without a primary key is");
+  }
+  OZ(sql.append(")"));
+  return ret;
+}
+
 ObAlterTableResolver::ObAlterTableResolver(ObResolverParams &params)
     : ObDDLResolver(params),
       table_schema_(NULL),
@@ -493,6 +541,30 @@ int ObAlterTableResolver::resolve_action_list(const ParseNode &node)
         case T_ALTER_FOREIGN_KEY_OPTION: {
             alter_table_stmt->set_alter_table_index();
             if (OB_FAIL(resolve_foreign_key_options(*action_node))) {
+            }
+            break;
+          }
+        case T_AI_COLUMN_RETRY: {
+            ObString column_name;
+            ObString stored_column_name;
+            ObString stored_rowkey_expr;
+            ObSqlString rowkey_expr;
+            if (1 != node.num_child_) {
+              ret = OB_NOT_SUPPORTED;
+              LOG_USER_ERROR(OB_NOT_SUPPORTED,
+                             "combining AI COLUMN RETRY with another ALTER action");
+            } else if (2 != action_node->num_child_ || OB_ISNULL(action_node->children_) ||
+                       OB_ISNULL(action_node->children_[0])) {
+              ret = OB_ERR_UNEXPECTED;
+            } else {
+              column_name.assign_ptr(action_node->children_[0]->str_value_,
+                                     action_node->children_[0]->str_len_);
+              if (OB_FAIL(build_ai_retry_rowkey_expr(*table_schema_, rowkey_expr))) {
+              } else if (OB_FAIL(ob_write_string(*allocator_, column_name, stored_column_name))) {
+              } else if (OB_FAIL(ob_write_string(*allocator_, rowkey_expr.string(), stored_rowkey_expr))) {
+              } else {
+                alter_table_stmt->set_ai_column_retry(stored_column_name, stored_rowkey_expr);
+              }
             }
             break;
           }
@@ -3391,6 +3463,43 @@ int ObAlterTableResolver::process_timestamp_column(ObColumnResolveStat &stat,
   return ret;
 }
 
+int ObAlterTableResolver::add_ai_column_hidden_columns(AIColumnDef &def)
+{
+  int ret = OB_SUCCESS;
+  ObAlterTableStmt *alter_stmt = get_alter_table_stmt();
+  for (int kind = 0; OB_SUCC(ret) && kind < 3; ++kind) {
+    AlterColumnSchema hidden;
+    char name[OB_MAX_COLUMN_NAME_LENGTH + 1];
+    const char *suffix = (0 == kind ? "state" : (1 == kind ? "request" : "result_spec"));
+    const int len = snprintf(name, sizeof(name), "__ai_%lu_%s", def.column_name_.hash(), suffix);
+    hidden.alter_type_ = OB_DDL_ADD_COLUMN;
+    hidden.set_is_hidden(true);
+    hidden.set_nullable(true);
+    if (len <= 0 || len >= static_cast<int>(sizeof(name))) {
+      ret = OB_SIZE_OVERFLOW;
+    } else if (0 == kind) {
+      hidden.set_data_type(ObIntType);
+      hidden.set_charset_type(CHARSET_BINARY);
+      hidden.set_collation_type(CS_TYPE_BINARY);
+    } else {
+      hidden.set_data_type(ObVarcharType);
+      hidden.set_data_length(1 == kind ? 64 : 4096);
+      hidden.set_charset_type(table_schema_->get_charset_type());
+      hidden.set_collation_type(table_schema_->get_collation_type());
+    }
+    ObString hidden_name(len, name);
+    ObString *saved_name = (0 == kind ? &def.state_column_name_
+                                      : (1 == kind ? &def.request_column_name_
+                                                   : &def.result_spec_column_name_));
+    if (OB_FAIL(ret)) {
+    } else if (OB_FAIL(hidden.set_column_name(hidden_name))) {
+    } else if (OB_FAIL(ob_write_string(*allocator_, hidden_name, *saved_name))) {
+    } else if (OB_FAIL(alter_stmt->add_column(hidden))) {
+    }
+  }
+  return ret;
+}
+
 int ObAlterTableResolver::resolve_add_column(const ParseNode &node, ObColumnNameSet &add_column_names_set)
 {
   int ret = OB_SUCCESS;
@@ -3412,6 +3521,7 @@ int ObAlterTableResolver::resolve_add_column(const ParseNode &node, ObColumnName
         SQL_RESV_LOG(WARN, "invalid parse tree", K(ret));
       } else {
         //resolve column definition
+        const int64_t ai_def_count = alter_table_stmt->get_ai_column_defs().count();
         stat.reset();
         bool is_modify_column_visibility = false;
         ObSEArray<ObColumnSchemaV2 *, 8> resolved_cols;
@@ -3456,6 +3566,9 @@ int ObAlterTableResolver::resolve_add_column(const ParseNode &node, ObColumnName
         //add column
         if (OB_SUCC(ret)) {
           if (OB_FAIL(alter_table_stmt->add_column(alter_column_schema))) {
+          } else if (ai_def_count < alter_table_stmt->get_ai_column_defs().count()
+                     && OB_FAIL(add_ai_column_hidden_columns(
+                         *alter_table_stmt->get_ai_column_defs().at(ai_def_count)))) {
           } else if (FALSE_IT(alter_table_stmt->set_sql_mode(session_info_->get_sql_mode()))) {
           }
         }

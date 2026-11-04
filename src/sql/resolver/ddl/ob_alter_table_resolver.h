@@ -95,6 +95,7 @@ public:
   int resolve_modify_all_trigger(const ParseNode &node);
 
 private:
+  int add_ai_column_hidden_columns(AIColumnDef &def);
   int check_dup_foreign_keys_exist(
       share::schema::ObSchemaGetterGuard *schema_guard,
       const obcall::ObCreateForeignKeyArg &foreign_key_arg);

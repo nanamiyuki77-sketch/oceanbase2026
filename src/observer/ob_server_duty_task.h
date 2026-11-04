@@ -50,6 +50,19 @@ private:
   static constexpr int64_t SCHEDULE_PERIOD = 3 * 1000L * 1000L;
 };
 
+class AIColumnWorkerTask : private common::ObTimerTask
+{
+public:
+  AIColumnWorkerTask();
+  int schedule(common::ObTimer &timer);
+private:
+  void runTimerTask() override;
+  int process_one_group();
+private:
+  static constexpr int64_t SCHEDULE_PERIOD = 100L * 1000L;
+  common::ObArenaAllocator allocator_;
+};
+
 }  // observer
 }  // oceanbase
 
