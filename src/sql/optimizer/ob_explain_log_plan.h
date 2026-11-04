@@ -32,6 +32,7 @@ namespace sql
   protected:
     virtual int generate_normal_raw_plan() override;
   private:
+    int generate_describe_raw_plan();
     int check_explain_generate_plan_with_outline(ObLogPlan *real_plan);
     DISALLOW_COPY_AND_ASSIGN(ObExplainLogPlan);
   };

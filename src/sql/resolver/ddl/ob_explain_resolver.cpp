@@ -65,7 +65,9 @@ int ObExplainResolver::resolve(const ParseNode &parse_tree)
       } else {
         explain_stmt->set_explain_query_stmt(static_cast<ObDMLStmt *>(child_stmt));
         ParseNode *format = parse_tree.children_[EXPLAIN_FORMAT];
-        if (NULL != format) {
+        if (NULL != format && T_INT == format->type_ && 0 != format->value_) {
+          explain_stmt->set_describe_query(true);
+        } else if (NULL != format) {
           switch (format->type_) {
           case T_OUTLINE:
           {

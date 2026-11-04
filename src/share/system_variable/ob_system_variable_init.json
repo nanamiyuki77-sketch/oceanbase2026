@@ -2459,6 +2459,21 @@
     "background_cn": "导入导出功能未限制文件访问可能存在漏洞",
     "ref_url": ""
   },
+  "enable_file_sql": {
+    "id": 10754,
+    "name": "enable_file_sql",
+    "default_value": "0",
+    "base_value": "0",
+    "data_type": "bool",
+    "info": "enable querying local files through table functions",
+    "flags": "SESSION | INFLUENCE_PLAN",
+    "min_val": "0",
+    "max_val": "1",
+    "publish_version": "",
+    "info_cn": "是否允许通过表函数查询本地文件",
+    "background_cn": "文件 SQL 默认关闭，开启后仍受 secure_file_priv 限制",
+    "ref_url": ""
+  },
   "_enable_parallel_query": {
     "id": 10104,
     "name": "_enable_parallel_query",

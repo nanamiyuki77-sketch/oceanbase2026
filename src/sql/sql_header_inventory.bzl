@@ -471,6 +471,7 @@ SQL_PRIVATE_HEADERS = [
     "engine/basic/chunk_store/ob_default_block_writer.h",
     "engine/basic/ob_expr_values_op.h",
     "engine/basic/ob_external_file_writer.h",
+    "engine/basic/ob_file_table.h",
     "engine/basic/ob_function_table_op.h",
     "engine/basic/ob_group_join_buffer.h",
     "engine/basic/ob_hash_partitioning_basic.h",

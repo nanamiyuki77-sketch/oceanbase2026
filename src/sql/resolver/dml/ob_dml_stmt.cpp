@@ -190,6 +190,13 @@ int TableItem::deep_copy(ObIRawExprCopier &expr_copier,
       && OB_FAIL(deep_copy_json_table_def(*other.json_table_def_, expr_copier, allocator))) {
   } else if (OB_FAIL(expr_copier.copy(other.snapshot_query_expr_, snapshot_query_expr_))) {
   } else if (OB_FAIL(expr_copier.copy(other.function_table_expr_, function_table_expr_))) {
+  } else if (FALSE_IT(file_table_type_ = other.file_table_type_)) {
+  } else if (FALSE_IT(file_table_options_ = other.file_table_options_)) {
+  } else if (FALSE_IT(file_path_ = other.file_path_)) {
+  } else if (FALSE_IT(file_size_ = other.file_size_)) {
+  } else if (FALSE_IT(file_mtime_ns_ = other.file_mtime_ns_)) {
+  } else if (OB_FAIL(file_column_names_.assign(other.file_column_names_))) {
+  } else if (OB_FAIL(file_column_types_.assign(other.file_column_types_))) {
   } else if (OB_FAIL(part_ids_.assign(other.part_ids_))) {
   } else if (OB_FAIL(part_names_.assign(other.part_names_))) {
   } else if (is_values_table() &&

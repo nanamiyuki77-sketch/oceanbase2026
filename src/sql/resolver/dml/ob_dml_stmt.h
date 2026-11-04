@@ -18,6 +18,7 @@
 #define OCEANBASE_SQL_STMT_H_
 #include "data_plane/access/ob_tablet_scan.h"
 #include "sql/resolver/expr/ob_raw_expr.h"
+#include "sql/engine/basic/ob_file_table.h"
 #include "lib/string/ob_string.h"
 #include "lib/utility/ob_mod_define.h"
 #include "lib/allocator/ob_allocator.h"
@@ -150,6 +151,10 @@ struct TableItem
     snapshot_query_expr_ = nullptr;
     snapshot_query_type_ = SnapshotQueryType::NOT_USING;
     function_table_expr_ = nullptr;
+    file_table_type_ = FILE_TABLE_NONE;
+    file_size_ = 0;
+    file_mtime_ns_ = 0;
+    file_table_options_ = FileTableOptions();
     ddl_schema_version_ = 0;
     ddl_table_id_ = common::OB_INVALID_ID;
     json_table_def_ = nullptr;
@@ -293,6 +298,13 @@ struct TableItem
   ObRawExpr *snapshot_query_expr_;
   SnapshotQueryType snapshot_query_type_;
   ObRawExpr *function_table_expr_;
+  FileTableType file_table_type_;
+  FileTableOptions file_table_options_;
+  common::ObString file_path_;
+  int64_t file_size_;
+  int64_t file_mtime_ns_;
+  common::ObSEArray<common::ObString, 8> file_column_names_;
+  common::ObSEArray<int64_t, 8> file_column_types_;
   int64_t ddl_schema_version_;
   int64_t ddl_table_id_;
   // table partition

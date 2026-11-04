@@ -18,6 +18,7 @@
 #include "sql/optimizer/ob_explain_log_plan.h"
 #include "sql/optimizer/ob_log_values.h"
 #include "sql/code_generator/ob_code_generator.h"
+#include "sql/resolver/dml/ob_select_stmt.h"
 
 using namespace oceanbase;
 using namespace sql;
@@ -37,6 +38,8 @@ int ObExplainLogPlan::generate_normal_raw_plan()
   int ret = OB_SUCCESS;
   if (OB_ISNULL(get_stmt()) || OB_UNLIKELY(!get_stmt()->is_explain_stmt())) {
     ret = OB_ERR_UNEXPECTED;
+  } else if (static_cast<const ObExplainStmt *>(get_stmt())->is_describe_query()) {
+    ret = generate_describe_raw_plan();
   } else {
     ObLogPlan *child_plan = NULL;
     const ObDMLStmt *child_stmt = NULL;
@@ -105,6 +108,65 @@ int ObExplainLogPlan::generate_normal_raw_plan()
                                             ObPhyPlanType::OB_PHY_PLAN_LOCAL,
                                             false);
     }
+  }
+  return ret;
+}
+
+int ObExplainLogPlan::generate_describe_raw_plan()
+{
+  int ret = OB_SUCCESS;
+  ObLogicalOperator *top = NULL;
+  ObLogValues *values_op = NULL;
+  const ObExplainStmt *explain_stmt = static_cast<const ObExplainStmt *>(get_stmt());
+  const ObDMLStmt *child_stmt = explain_stmt->get_explain_query_stmt();
+  const ObSelectStmt *select_stmt = NULL;
+  if (OB_ISNULL(child_stmt) || !child_stmt->is_select_stmt()) {
+    ret = OB_NOT_SUPPORTED;
+    LOG_USER_ERROR(OB_NOT_SUPPORTED, "DESCRIBE non-SELECT statement");
+  } else if (FALSE_IT(select_stmt = static_cast<const ObSelectStmt *>(child_stmt))) {
+  } else if (OB_FAIL(allocate_values_as_top(top))) {
+  } else if (OB_ISNULL(top) || OB_UNLIKELY(LOG_VALUES != top->get_type())) {
+    ret = OB_ERR_UNEXPECTED;
+  } else {
+    set_plan_root(top);
+    top->mark_is_plan_root();
+    values_op = static_cast<ObLogValues *>(top);
+    optimizer_context_.set_packed(false);
+    for (int64_t i = 0; OB_SUCC(ret) && i < select_stmt->get_select_item_size(); ++i) {
+      const SelectItem &item = select_stmt->get_select_item(i);
+      if (OB_ISNULL(item.expr_)) {
+        ret = OB_ERR_UNEXPECTED;
+      } else {
+        const ObString &column_name = item.alias_name_.empty() ? item.expr_name_ : item.alias_name_;
+        const char *type_name = ObTinyIntType == item.expr_->get_data_type()
+                                ? "BOOLEAN" : ob_obj_type_str(item.expr_->get_data_type());
+        ObObj cells[6];
+        cells[0].set_varchar(column_name);
+        cells[1].set_varchar(ObString::make_string(type_name));
+        cells[2].set_varchar(ObString::make_string(item.expr_->is_not_null_for_read() ? "NO" : "YES"));
+        cells[3].set_null();
+        cells[4].set_null();
+        cells[5].set_null();
+        ObNewRow row(cells, ARRAYSIZEOF(cells));
+        if (OB_FAIL(values_op->add_row(row))) {
+          LOG_WARN("failed to add DESCRIBE row", K(ret), K(column_name));
+        }
+      }
+    }
+    if (OB_SUCC(ret)) {
+      values_op->set_op_id(0);
+      set_max_op_id(1);
+    }
+  }
+  get_optimizer_context().get_all_exprs().reuse();
+  for (int64_t i = 0; OB_SUCC(ret) && i < 6; ++i) {
+    if (OB_FAIL(allocate_output_expr_for_values_op(*values_op))) {
+    }
+  }
+  if (OB_SUCC(ret)) {
+    get_optimizer_context().set_plan_type(ObPhyPlanType::OB_PHY_PLAN_LOCAL,
+                                          ObPhyPlanType::OB_PHY_PLAN_LOCAL,
+                                          false);
   }
   return ret;
 }

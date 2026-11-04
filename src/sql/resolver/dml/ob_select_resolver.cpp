@@ -3048,7 +3048,7 @@ int ObSelectResolver::resolve_into_outfile_without_format(const ParseNode *node,
                                                           ObSelectIntoItem &into_item)
 {
   int ret = OB_SUCCESS;
-  if (node->num_child_ != 5) {
+  if (node->num_child_ != 5 && node->num_child_ != 6) {
     ret = OB_ERR_UNEXPECTED;
   } else if (OB_FAIL(resolve_into_const_node(node->children_[0], into_item.outfile_name_))) {
   }
@@ -3076,6 +3076,14 @@ int ObSelectResolver::resolve_into_outfile_without_format(const ParseNode *node,
   // file: single, max_file_size, buffer_size
   if (OB_SUCC(ret) && NULL != node->children_[4]) {
     if (OB_FAIL(resolve_into_file_node(node->children_[4], into_item))) {
+    }
+  }
+  if (OB_SUCC(ret) && node->num_child_ == 6) {
+    into_item.write_header_ = 0 != (node->value_ & 1);
+    into_item.atomic_publish_ = 0 != (node->value_ & 2);
+    const ParseNode *null_node = node->children_[5];
+    if (OB_NOT_NULL(null_node) && OB_FAIL(ob_write_string(*allocator_,
+        ObString(null_node->str_len_, null_node->str_value_), into_item.null_string_))) {
     }
   }
   return ret;
