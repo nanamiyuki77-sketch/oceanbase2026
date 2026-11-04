@@ -1,0 +1,5 @@
+id;name;note;optional
+1;Alice;"hello;world";NULL
+2;Bob;"say !"hi!"";x
+3;Chen;"line1
+line2";NULL

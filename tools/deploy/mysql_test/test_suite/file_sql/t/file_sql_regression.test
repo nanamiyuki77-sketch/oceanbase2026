@@ -1,0 +1,59 @@
+# Supplemental File SQL correctness coverage. This is not an official scoring case.
+--source mysql_test/test_suite/file_sql/include/copy_file_sql_data.inc
+
+--disable_query_log
+let $FILE_SQL_HOST = query_get_value('select host_ip()',host_ip(), 1);
+let $FILE_SQL_DATA_DIR = $OBSERVER_DIR/data_for_mysqltest_file_sql;
+let $FILE_SQL_REGRESSION_COPY = scp -q $PWD/mysql_test/test_suite/file_sql/regression_data/* $FILE_SQL_HOST:"$FILE_SQL_DATA_DIR/";
+exec $FILE_SQL_REGRESSION_COPY;
+
+set session enable_file_sql = ON;
+
+--echo # CSV delimiter, quote, escape, NULL text and multiline records
+eval select id, name, replace(note, char(10), '<NL>') as note, optional
+       from read_csv('$FILE_SQL_DATA_DIR/special.csv', delimiter = ';',
+                     quote = '"', escape = '!', nullstr = 'NULL')
+      order by id;
+
+--echo # all-NULL metadata
+eval describe select * from read_csv('$FILE_SQL_DATA_DIR/all_null.csv');
+
+--echo # JSONL union and type widening
+eval select id, `group`, active, value
+       from read_json('$FILE_SQL_DATA_DIR/union.jsonl')
+      order by id;
+
+--echo # native cross-format JOIN
+eval select c.id as csv_id, j.id as json_id
+       from read_csv('$FILE_SQL_DATA_DIR/special.csv', delimiter = ';', escape = '!') c
+       inner join read_json('$FILE_SQL_DATA_DIR/union.jsonl') j on c.id = j.id
+      order by c.id;
+
+--echo # native GROUP BY and HAVING
+eval select optional, count(*) as n, sum(id) as id_sum
+       from read_csv('$FILE_SQL_DATA_DIR/special.csv', delimiter = ';',
+                     escape = '!', nullstr = 'NULL')
+      group by optional having count(*) >= 1 order by optional;
+
+--echo # malformed and unsupported input
+--error 1064
+eval select * from read_csv('$FILE_SQL_DATA_DIR/bad.csv');
+--error 1235
+eval select * from read_json('$FILE_SQL_DATA_DIR/nested.jsonl');
+
+--echo # COPY table, custom CSV options, readback and no overwrite
+drop table if exists file_sql_copy_source;
+create table file_sql_copy_source(id bigint, name varchar(64), note varchar(64));
+insert into file_sql_copy_source values (1, 'A;B', null), (2, 'O''Brien', 'x');
+eval copy file_sql_copy_source to '$FILE_SQL_DATA_DIR/table_export.csv'
+       (format csv, header, nullstr 'NULL', delimiter ';', quote '''', escape '!');
+eval select id, name, note
+       from read_csv('$FILE_SQL_DATA_DIR/table_export.csv', delimiter = ';',
+                     quote = '''', escape = '!', nullstr = 'NULL') order by id;
+--error 1086
+eval copy (select 9 as id) to '$FILE_SQL_DATA_DIR/table_export.csv' (format csv, header);
+drop table file_sql_copy_source;
+
+set session enable_file_sql = OFF;
+--enable_query_log
+--source mysql_test/test_suite/file_sql/include/remove_file_sql_data.inc

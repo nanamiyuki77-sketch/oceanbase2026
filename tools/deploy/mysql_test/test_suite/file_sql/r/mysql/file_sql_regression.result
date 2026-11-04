@@ -1,0 +1,33 @@
+# CSV delimiter, quote, escape, NULL text and multiline records
+id	name	note	optional
+1	Alice	hello;world	NULL
+2	Bob	say "hi"	x
+3	Chen	line1<NL>line2	NULL
+# all-NULL metadata
+column_name	column_type	null	key	default	extra
+id	BIGINT	NO	NULL	NULL	NULL
+empty	NULL	YES	NULL	NULL	NULL
+# JSONL union and type widening
+id	group	active	value
+1	a	NULL	2
+2	NULL	1	3.500000
+3	a	NULL	wide
+# native cross-format JOIN
+csv_id	json_id
+1	1
+2	2
+3	3
+# native GROUP BY and HAVING
+optional	n	id_sum
+NULL	2	4
+x	1	2
+# malformed and unsupported input
+ERROR 42000: Parse error
+ERROR 0A000: Not supported feature or function
+# COPY table, custom CSV options, readback and no overwrite
+Warnings:
+Note	1051	Unknown table 'test.file_sql_copy_source'
+id	name	note
+1	A;B	NULL
+2	O'Brien	x
+ERROR 58000: File already exist
