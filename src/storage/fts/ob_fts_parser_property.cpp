@@ -1025,15 +1025,19 @@ int ObFTParserProperty::parse_for_parser_helper(const ObFTParser &parser, const 
       dict_table_ = ObString(ObFTSLiteral::CONFIG_NAME_DICT_TABLE);
       stopword_table_ = ObString(ObFTSLiteral::CONFIG_NAME_STOPWORD_TABLE);
       quantifier_table_ = ObString(ObFTSLiteral::CONFIG_NAME_QUANTIFIER_TABLE);
-      ObString ik_smart;
-      if (OB_FAIL(props.config_get_ik_mode(ik_smart))) {
+      if (json_str.empty()) {
+        ik_mode_smart_ = true;
       } else {
-        if (0 == ik_smart.case_compare(ObString(ObFTSLiteral::FT_IK_MODE_SMART))) {
-          ik_mode_smart_ = true;
-        } else if (0 == ik_smart.case_compare(ObString(ObFTSLiteral::FT_IK_MODE_MAX_WORD))) {
-          ik_mode_smart_ = false;
+        ObString ik_smart;
+        if (OB_FAIL(props.config_get_ik_mode(ik_smart))) {
         } else {
-          ret = OB_INVALID_ARGUMENT;
+          if (0 == ik_smart.case_compare(ObString(ObFTSLiteral::FT_IK_MODE_SMART))) {
+            ik_mode_smart_ = true;
+          } else if (0 == ik_smart.case_compare(ObString(ObFTSLiteral::FT_IK_MODE_MAX_WORD))) {
+            ik_mode_smart_ = false;
+          } else {
+            ret = OB_INVALID_ARGUMENT;
+          }
         }
       }
     } else if (parser.is_space()) {
