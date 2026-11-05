@@ -1,0 +1,25 @@
+connection default;
+
+--disable_query_log
+--error 0,11112
+call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('log_redaction_endpoint');
+--error 0,11118
+call DBMS_AI_SERVICE.DROP_AI_MODEL('log_redaction_model');
+
+call DBMS_AI_SERVICE.CREATE_AI_MODEL(
+  'log_redaction_model',
+  '{"type":"completion","model_name":"mock-complete"}');
+call DBMS_AI_SERVICE.CREATE_AI_MODEL_ENDPOINT(
+  'log_redaction_endpoint',
+  '{"ai_model_name":"log_redaction_model","url":"http://127.0.0.1:1/v1/chat/completions","access_key":"SEEKDB_LOG_REDACTION_CANARY_7F3A91","provider":"openai","request_model_name":"mock-complete"}');
+call DBMS_AI_SERVICE.ALTER_AI_MODEL_ENDPOINT(
+  'log_redaction_endpoint',
+  '{"url":"http://127.0.0.1:2/v1/chat/completions"}');
+
+--exec sh -c "if grep -a -F 'SEEKDB_LOG_REDACTION_CANARY_7F3A91' \"$OBSERVER_DIR/log/seekdb.log\"; then exit 1; fi"
+
+call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('log_redaction_endpoint');
+call DBMS_AI_SERVICE.DROP_AI_MODEL('log_redaction_model');
+--enable_query_log
+
+select 'credential log redaction ok';

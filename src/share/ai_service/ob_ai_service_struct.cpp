@@ -70,7 +70,7 @@ int ObAiModelEndpointInfo::parse_from_json_base(common::ObArenaAllocator &alloca
   name_ = name;
   if (OB_FAIL(merge_delta_endpoint(allocator, params_jbase))) {
   }
-  LOG_INFO("parse from json base", K(ret), K(params_jbase), K(params_jbase.json_type()), K(params_jbase.element_count()));
+  LOG_INFO("parse from json base", K(ret), K(*this), K(params_jbase.json_type()), K(params_jbase.element_count()));
   return ret;
 }
 
@@ -183,7 +183,7 @@ int ObAiModelEndpointInfo::merge_delta_endpoint(common::ObArenaAllocator &alloca
     }
   }
 
-  LOG_INFO("merge delta endpoint", K(ret), K(delta_jbase), K(delta_jbase.json_type()), K(delta_jbase.element_count()));
+  LOG_INFO("merge delta endpoint", K(ret), K(*this), K(delta_jbase.json_type()), K(delta_jbase.element_count()));
   return ret;
 }
 
