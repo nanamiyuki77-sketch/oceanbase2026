@@ -69,6 +69,14 @@ int append_hex_literal(ObSqlString &sql, const ObString &value)
   OZ(sql.append("'"));
   return ret;
 }
+
+int append_lease_owner_filter(ObSqlString &sql, const ObString &lease_owner)
+{
+  int ret = OB_SUCCESS;
+  OZ(sql.append(" AND lease_owner="));
+  OZ(append_hex_literal(sql, lease_owner));
+  return ret;
+}
 } // namespace
 
 ObServerDutyTask::ObServerDutyTask()
@@ -174,6 +182,10 @@ int AIColumnWorkerTask::process_one_group()
   uint64_t table_id = OB_INVALID_ID;
   ObString request_id;
   ObString rowkey_predicate;
+  char lease_owner_buf[64];
+  const int lease_owner_len = snprintf(lease_owner_buf, sizeof(lease_owner_buf), "%ld-%ld",
+                                       ObTimeUtility::current_time(), GETTID());
+  ObString lease_owner(lease_owner_len, lease_owner_buf);
   ObSqlString sql;
   ObMySQLProxy *proxy = GCTX.sql_proxy_;
   if (OB_ISNULL(proxy)) {
@@ -207,10 +219,13 @@ int AIColumnWorkerTask::process_one_group()
   if (OB_SUCC(ret) && OB_INVALID_ID != table_id) {
     int64_t affected_rows = 0;
     sql.reset();
-    OZ(sql.append_fmt("UPDATE %s.%s SET state=1, "
+    OZ(sql.append_fmt("UPDATE %s.%s SET state=1, lease_owner=",
+                      OB_SYS_DATABASE_NAME, OB_ALL_AI_COLUMN_TASK_TNAME));
+    OZ(append_hex_literal(sql, lease_owner));
+    OZ(sql.append(", "
                       "eligible_ts=DATE_ADD(NOW(6), INTERVAL 5 SECOND) "
-                      "WHERE table_id=%lu AND request_id=",
-                      OB_SYS_DATABASE_NAME, OB_ALL_AI_COLUMN_TASK_TNAME, table_id));
+                      "WHERE table_id="));
+    OZ(sql.append_fmt("%lu AND request_id=", table_id));
     OZ(append_hex_literal(sql, request_id));
     OZ(sql.append(" AND rowkey_predicate="));
     OZ(append_hex_literal(sql, rowkey_predicate));
@@ -246,6 +261,8 @@ int AIColumnWorkerTask::process_one_group()
     OZ(append_hex_literal(sql, request_id));
     OZ(sql.append(" AND task.rowkey_predicate="));
     OZ(append_hex_literal(sql, rowkey_predicate));
+    OZ(sql.append(" AND task.lease_owner="));
+    OZ(append_hex_literal(sql, lease_owner));
     OZ(sql.append(" ORDER BY task.task_id"));
   }
   if (OB_SUCC(ret) && OB_INVALID_ID != table_id) {
@@ -298,6 +315,7 @@ int AIColumnWorkerTask::process_one_group()
     OZ(append_hex_literal(sql, request_id));
     OZ(sql.append(" AND rowkey_predicate="));
     OZ(append_hex_literal(sql, rowkey_predicate));
+    OZ(append_lease_owner_filter(sql, lease_owner));
     OZ(proxy->write(sql.ptr(), affected_rows));
   }
 
@@ -325,6 +343,8 @@ int AIColumnWorkerTask::process_one_group()
     OZ(append_hex_literal(sql, request_id));
     OZ(sql.append(" AND task.rowkey_predicate="));
     OZ(append_hex_literal(sql, rowkey_predicate));
+    OZ(sql.append(" AND task.lease_owner="));
+    OZ(append_hex_literal(sql, lease_owner));
     OZ(sql.append(")"));
   }
 
@@ -336,11 +356,26 @@ int AIColumnWorkerTask::process_one_group()
     } else if (OB_FAIL(trans.write(sql.ptr(), affected_rows))) {
     } else {
       sql.reset();
+      OZ(sql.append_fmt("UPDATE %s.%s SET eligible_ts=DATE_ADD(eligible_ts, INTERVAL 1 MICROSECOND) "
+                        "WHERE table_id=%lu AND request_id=",
+                        OB_SYS_DATABASE_NAME, OB_ALL_AI_COLUMN_TASK_TNAME, table_id));
+      OZ(append_hex_literal(sql, request_id));
+      OZ(sql.append(" AND rowkey_predicate="));
+      OZ(append_hex_literal(sql, rowkey_predicate));
+      OZ(append_lease_owner_filter(sql, lease_owner));
+      OZ(trans.write(sql.ptr(), affected_rows));
+      if (OB_SUCC(ret) && 0 == affected_rows) {
+        ret = OB_STATE_NOT_MATCH;
+      }
+    }
+    if (OB_SUCC(ret)) {
+      sql.reset();
       OZ(sql.append_fmt("DELETE FROM %s.%s WHERE table_id=%lu AND request_id=",
                         OB_SYS_DATABASE_NAME, OB_ALL_AI_COLUMN_TASK_TNAME, table_id));
       OZ(append_hex_literal(sql, request_id));
       OZ(sql.append(" AND rowkey_predicate="));
       OZ(append_hex_literal(sql, rowkey_predicate));
+      OZ(append_lease_owner_filter(sql, lease_owner));
       OZ(trans.write(sql.ptr(), affected_rows));
     }
     worker_ret = ret;
@@ -367,6 +402,7 @@ int AIColumnWorkerTask::process_one_group()
       OZ(append_hex_literal(sql, request_id));
       OZ(sql.append(" AND rowkey_predicate="));
       OZ(append_hex_literal(sql, rowkey_predicate));
+      OZ(append_lease_owner_filter(sql, lease_owner));
       int64_t affected_rows = 0;
       OZ(proxy->write(sql.ptr(), affected_rows));
     } else {
@@ -379,6 +415,7 @@ int AIColumnWorkerTask::process_one_group()
       OZ(append_hex_literal(sql, request_id));
       OZ(sql.append(" AND rowkey_predicate="));
       OZ(append_hex_literal(sql, rowkey_predicate));
+      OZ(append_lease_owner_filter(sql, lease_owner));
       OZ(trans.write(sql.ptr(), affected_rows));
       if (trans.is_started()) {
         int end_ret = trans.end(OB_SUCC(ret));

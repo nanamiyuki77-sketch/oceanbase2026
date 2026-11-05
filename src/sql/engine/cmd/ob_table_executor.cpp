@@ -104,6 +104,8 @@ static int register_ai_columns(ObSQLSessionInfo &session,
     } else if (OB_FAIL(conn->execute_write(sql.ptr(), affected_rows))) {
     } else if (1 != affected_rows) {
       ret = OB_ERR_UNEXPECTED;
+    } else {
+      def->definition_version_ = schema_version;
     }
   }
 
@@ -116,6 +118,108 @@ static int register_ai_columns(ObSQLSessionInfo &session,
     } else {
       int tmp_ret = conn->rollback();
       LOG_WARN_RET(tmp_ret, "failed to rollback AI column metadata transaction");
+    }
+  }
+  return ret;
+}
+
+static int load_ai_columns(const uint64_t table_id,
+                           const ObTableSchema &table_schema,
+                           ObIAllocator &allocator,
+                           ObIArray<AIColumnDef *> &defs,
+                           int64_t &latest_definition_version)
+{
+  int ret = OB_SUCCESS;
+  ObMySQLProxy *proxy = GCTX.sql_proxy_;
+  ObSqlString sql;
+  latest_definition_version = 0;
+  if (OB_ISNULL(proxy)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else {
+    OZ(sql.append_fmt("SELECT column_id, column_name, max_retries, normalized_expr, "
+                      "execution_expr, dependency_columns, state_column_id, request_column_id, "
+                      "result_spec_column_id, result_type, vector_dimension, definition_version "
+                      "FROM %s.%s WHERE table_id=%lu ORDER BY column_id",
+                      OB_SYS_DATABASE_NAME, OB_ALL_AI_COLUMN_TNAME, table_id));
+  }
+  if (OB_SUCC(ret)) {
+    SMART_VAR(ObMySQLProxy::MySQLResult, res) {
+      sqlclient::ObMySQLResult *result = NULL;
+      if (OB_FAIL(proxy->read(res, sql.ptr()))) {
+      } else if (OB_ISNULL(result = res.get_result())) {
+        ret = OB_ERR_UNEXPECTED;
+      }
+      while (OB_SUCC(ret)) {
+        AIColumnDef *def = NULL;
+        ObString column_name;
+        ObString normalized_expr;
+        ObString execution_expr;
+        ObString dependencies;
+        int64_t column_id = OB_INVALID_ID;
+        int64_t state_column_id = OB_INVALID_ID;
+        int64_t request_column_id = OB_INVALID_ID;
+        int64_t result_spec_column_id = OB_INVALID_ID;
+        int64_t result_type = ObNullType;
+        if (OB_FAIL(result->next())) {
+          if (OB_ITER_END == ret) {
+            ret = OB_SUCCESS;
+          }
+          break;
+        }
+        if (OB_ISNULL(def = OB_NEWx(AIColumnDef, (&allocator)))) {
+          ret = OB_ALLOCATE_MEMORY_FAILED;
+        } else {
+          EXTRACT_INT_FIELD_MYSQL(*result, "column_id", column_id, int64_t);
+          EXTRACT_VARCHAR_FIELD_MYSQL(*result, "column_name", column_name);
+          EXTRACT_INT_FIELD_MYSQL(*result, "max_retries", def->max_retries_, int64_t);
+          EXTRACT_VARCHAR_FIELD_MYSQL(*result, "normalized_expr", normalized_expr);
+          EXTRACT_VARCHAR_FIELD_MYSQL(*result, "execution_expr", execution_expr);
+          EXTRACT_VARCHAR_FIELD_MYSQL(*result, "dependency_columns", dependencies);
+          EXTRACT_INT_FIELD_MYSQL(*result, "state_column_id", state_column_id, int64_t);
+          EXTRACT_INT_FIELD_MYSQL(*result, "request_column_id", request_column_id, int64_t);
+          EXTRACT_INT_FIELD_MYSQL(*result, "result_spec_column_id", result_spec_column_id, int64_t);
+          EXTRACT_INT_FIELD_MYSQL(*result, "result_type", result_type, int64_t);
+          EXTRACT_INT_FIELD_MYSQL(*result, "vector_dimension", def->vector_dimension_, int64_t);
+          EXTRACT_INT_FIELD_MYSQL(*result, "definition_version", def->definition_version_, int64_t);
+        }
+        const ObColumnSchemaV2 *state_col = NULL;
+        const ObColumnSchemaV2 *request_col = NULL;
+        const ObColumnSchemaV2 *result_spec_col = NULL;
+        if (OB_FAIL(ret)) {
+        } else if (OB_ISNULL(state_col = table_schema.get_column_schema(state_column_id))
+                   || OB_ISNULL(request_col = table_schema.get_column_schema(request_column_id))
+                   || OB_ISNULL(result_spec_col = table_schema.get_column_schema(result_spec_column_id))) {
+          ret = OB_ERR_UNEXPECTED;
+        } else if (OB_FAIL(ob_write_string(allocator, column_name, def->column_name_))) {
+        } else if (OB_FAIL(ob_write_string(allocator, normalized_expr, def->normalized_expression_))) {
+        } else if (OB_FAIL(ob_write_string(allocator, execution_expr, def->execution_expression_))) {
+        } else if (OB_FAIL(ob_write_string(allocator, state_col->get_column_name_str(), def->state_column_name_))) {
+        } else if (OB_FAIL(ob_write_string(allocator, request_col->get_column_name_str(), def->request_column_name_))) {
+        } else if (OB_FAIL(ob_write_string(allocator, result_spec_col->get_column_name_str(),
+                                           def->result_spec_column_name_))) {
+        }
+        for (int64_t begin = 0; OB_SUCC(ret) && begin < dependencies.length();) {
+          int64_t end = begin;
+          while (end < dependencies.length() && ',' != dependencies.ptr()[end]) {
+            ++end;
+          }
+          ObString dependency(end - begin, dependencies.ptr() + begin);
+          ObString saved_dependency;
+          if (OB_FAIL(ob_write_string(allocator, dependency, saved_dependency))) {
+          } else if (OB_FAIL(def->dependency_names_.push_back(saved_dependency))) {
+          }
+          begin = end + 1;
+        }
+        if (OB_SUCC(ret)) {
+          def->column_id_ = column_id;
+          def->state_column_id_ = state_column_id;
+          def->request_column_id_ = request_column_id;
+          def->result_spec_column_id_ = result_spec_column_id;
+          def->result_type_ = static_cast<ObObjType>(result_type);
+          latest_definition_version = MAX(latest_definition_version, def->definition_version_);
+          OZ(defs.push_back(def));
+        }
+      }
     }
   }
   return ret;
@@ -215,7 +319,6 @@ static int append_ai_dependency_change(ObSqlString &sql,
 static int append_ai_task_insert(ObSqlString &sql,
                                  const AIColumnDef &def,
                                  const ObTableSchema &table_schema,
-                                 const int64_t schema_version,
                                  const char *row_alias,
                                  const char *request_expr)
 {
@@ -227,7 +330,40 @@ static int append_ai_task_insert(ObSqlString &sql,
       table_schema.get_table_id(), def.column_id_))) {
   } else if (OB_FAIL(append_ai_rowkey_expr(sql, table_schema, row_alias))) {
   } else if (OB_FAIL(sql.append_fmt(", NOW(6), %s, 0, 0, %ld, %ld);",
-                                    request_expr, def.max_retries_, schema_version))) {
+                                    request_expr, def.max_retries_, def.definition_version_))) {
+  }
+  return ret;
+}
+
+static int append_ai_trigger_name(ObSqlString &sql,
+                                  const uint64_t table_id,
+                                  const int64_t trigger_version,
+                                  const char *suffix)
+{
+  return trigger_version > 0
+      ? sql.append_fmt("`__ai_%lu_%ld_%s`", table_id, trigger_version, suffix)
+      : sql.append_fmt("`__ai_%lu_%s`", table_id, suffix);
+}
+
+static int drop_ai_column_trigger_set(const ObString &database_name,
+                                      const uint64_t table_id,
+                                      const int64_t trigger_version)
+{
+  int ret = OB_SUCCESS;
+  ObMySQLProxy *proxy = GCTX.sql_proxy_;
+  static const char *SUFFIXES[] = {"bi", "bu", "au", "ai", "ad"};
+  for (int64_t i = 0; OB_SUCC(ret) && i < ARRAYSIZEOF(SUFFIXES); ++i) {
+    ObSqlString sql;
+    int64_t affected_rows = 0;
+    if (OB_ISNULL(proxy)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else {
+      OZ(sql.append("DROP TRIGGER IF EXISTS "));
+      OZ(append_ai_identifier(sql, database_name));
+      OZ(sql.append("."));
+      OZ(append_ai_trigger_name(sql, table_id, trigger_version, SUFFIXES[i]));
+      OZ(proxy->write(sql.ptr(), affected_rows));
+    }
   }
   return ret;
 }
@@ -251,7 +387,9 @@ static int install_ai_column_triggers(const ObIArray<AIColumnDef *> &defs,
   if (OB_SUCC(ret)) {
     OZ(sql.append("CREATE TRIGGER "));
     OZ(append_ai_identifier(sql, database_name));
-    OZ(sql.append_fmt(".`__ai_%lu_bi` BEFORE INSERT ON ", table_schema.get_table_id()));
+    OZ(sql.append("."));
+    OZ(append_ai_trigger_name(sql, table_schema.get_table_id(), schema_version, "bi"));
+    OZ(sql.append(" BEFORE INSERT ON "));
     OZ(append_ai_identifier(sql, database_name));
     OZ(sql.append("."));
     OZ(append_ai_identifier(sql, table_name));
@@ -271,7 +409,9 @@ static int install_ai_column_triggers(const ObIArray<AIColumnDef *> &defs,
     sql.reset();
     OZ(sql.append("CREATE TRIGGER "));
     OZ(append_ai_identifier(sql, database_name));
-    OZ(sql.append_fmt(".`__ai_%lu_bu` BEFORE UPDATE ON ", table_schema.get_table_id()));
+    OZ(sql.append("."));
+    OZ(append_ai_trigger_name(sql, table_schema.get_table_id(), schema_version, "bu"));
+    OZ(sql.append(" BEFORE UPDATE ON "));
     OZ(append_ai_identifier(sql, database_name));
     OZ(sql.append("."));
     OZ(append_ai_identifier(sql, table_name));
@@ -293,7 +433,9 @@ static int install_ai_column_triggers(const ObIArray<AIColumnDef *> &defs,
     sql.reset();
     OZ(sql.append("CREATE TRIGGER "));
     OZ(append_ai_identifier(sql, database_name));
-    OZ(sql.append_fmt(".`__ai_%lu_au` AFTER UPDATE ON ", table_schema.get_table_id()));
+    OZ(sql.append("."));
+    OZ(append_ai_trigger_name(sql, table_schema.get_table_id(), schema_version, "au"));
+    OZ(sql.append(" AFTER UPDATE ON "));
     OZ(append_ai_identifier(sql, database_name));
     OZ(sql.append("."));
     OZ(append_ai_identifier(sql, table_name));
@@ -308,7 +450,7 @@ static int install_ai_column_triggers(const ObIArray<AIColumnDef *> &defs,
                         table_schema.get_table_id(), def->column_id_));
       OZ(append_ai_rowkey_expr(sql, table_schema, "OLD"));
       OZ(sql.append(";"));
-      OZ(append_ai_task_insert(sql, *def, table_schema, schema_version, "NEW", "ai_request"));
+      OZ(append_ai_task_insert(sql, *def, table_schema, "NEW", "ai_request"));
       OZ(sql.append(" END IF;"));
     }
     OZ(sql.append(" END"));
@@ -319,14 +461,16 @@ static int install_ai_column_triggers(const ObIArray<AIColumnDef *> &defs,
     sql.reset();
     OZ(sql.append("CREATE TRIGGER "));
     OZ(append_ai_identifier(sql, database_name));
-    OZ(sql.append_fmt(".`__ai_%lu_ai` AFTER INSERT ON ", table_schema.get_table_id()));
+    OZ(sql.append("."));
+    OZ(append_ai_trigger_name(sql, table_schema.get_table_id(), schema_version, "ai"));
+    OZ(sql.append(" AFTER INSERT ON "));
     OZ(append_ai_identifier(sql, database_name));
     OZ(sql.append("."));
     OZ(append_ai_identifier(sql, table_name));
     OZ(sql.append(" FOR EACH ROW BEGIN DECLARE ai_request VARCHAR(64); SET ai_request = UUID();"));
     for (int64_t i = 0; OB_SUCC(ret) && i < defs.count(); ++i) {
       CK(OB_NOT_NULL(defs.at(i)));
-      OZ(append_ai_task_insert(sql, *defs.at(i), table_schema, schema_version, "NEW", "ai_request"));
+      OZ(append_ai_task_insert(sql, *defs.at(i), table_schema, "NEW", "ai_request"));
     }
     OZ(sql.append(" END"));
     OZ(proxy->write(sql.ptr(), affected_rows));
@@ -336,7 +480,9 @@ static int install_ai_column_triggers(const ObIArray<AIColumnDef *> &defs,
     sql.reset();
     OZ(sql.append("CREATE TRIGGER "));
     OZ(append_ai_identifier(sql, database_name));
-    OZ(sql.append_fmt(".`__ai_%lu_ad` AFTER DELETE ON ", table_schema.get_table_id()));
+    OZ(sql.append("."));
+    OZ(append_ai_trigger_name(sql, table_schema.get_table_id(), schema_version, "ad"));
+    OZ(sql.append(" AFTER DELETE ON "));
     OZ(append_ai_identifier(sql, database_name));
     OZ(sql.append("."));
     OZ(append_ai_identifier(sql, table_name));
@@ -344,6 +490,111 @@ static int install_ai_column_triggers(const ObIArray<AIColumnDef *> &defs,
                       OB_SYS_DATABASE_NAME, OB_ALL_AI_COLUMN_TASK_TNAME, table_schema.get_table_id()));
     OZ(append_ai_rowkey_expr(sql, table_schema, "OLD"));
     OZ(sql.append("; END"));
+    OZ(proxy->write(sql.ptr(), affected_rows));
+  }
+  return ret;
+}
+
+static int remove_ai_column_metadata(const uint64_t table_id,
+                                     const ObIArray<AIColumnDef *> &defs)
+{
+  int ret = OB_SUCCESS;
+  ObMySQLProxy *proxy = GCTX.sql_proxy_;
+  ObSqlString ids;
+  for (int64_t i = 0; OB_SUCC(ret) && i < defs.count(); ++i) {
+    if (OB_ISNULL(defs.at(i))) {
+      ret = OB_ERR_UNEXPECTED;
+    } else {
+      OZ(ids.append_fmt("%s%lu", 0 == i ? "" : ",", defs.at(i)->column_id_));
+    }
+  }
+  if (OB_SUCC(ret) && !defs.empty()) {
+    ObMySQLTransaction trans;
+    ObSqlString sql;
+    int64_t affected_rows = 0;
+    OZ(trans.start(proxy));
+    OZ(sql.append_fmt("DELETE FROM %s.%s WHERE table_id=%lu AND column_id IN (%s)",
+                      OB_SYS_DATABASE_NAME, OB_ALL_AI_COLUMN_TASK_TNAME,
+                      table_id, ids.ptr()));
+    OZ(trans.write(sql.ptr(), affected_rows));
+    sql.reset();
+    OZ(sql.append_fmt("DELETE FROM %s.%s WHERE table_id=%lu AND column_id IN (%s)",
+                      OB_SYS_DATABASE_NAME, OB_ALL_AI_COLUMN_TNAME,
+                      table_id, ids.ptr()));
+    OZ(trans.write(sql.ptr(), affected_rows));
+    if (trans.is_started()) {
+      const int end_ret = trans.end(OB_SUCC(ret));
+      if (OB_SUCC(ret) && OB_SUCCESS != end_ret) {
+        ret = end_ret;
+      }
+    }
+  }
+  return ret;
+}
+
+static int rollback_added_ai_columns(const ObString &database_name,
+                                     const ObString &table_name,
+                                     const uint64_t table_id,
+                                     const ObIArray<AIColumnDef *> &defs,
+                                     const int64_t trigger_version)
+{
+  int ret = OB_SUCCESS;
+  int tmp_ret = drop_ai_column_trigger_set(database_name, table_id, trigger_version);
+  LOG_WARN_RET(tmp_ret, "failed to remove partial AI column triggers", K(table_id),
+               K(trigger_version));
+  tmp_ret = remove_ai_column_metadata(table_id, defs);
+  LOG_WARN_RET(tmp_ret, "failed to remove partial AI column metadata", K(table_id));
+  ObMySQLProxy *proxy = GCTX.sql_proxy_;
+  ObSqlString sql;
+  int64_t affected_rows = 0;
+  if (OB_ISNULL(proxy)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else {
+    OZ(sql.append("ALTER TABLE "));
+    OZ(append_ai_identifier(sql, database_name));
+    OZ(sql.append("."));
+    OZ(append_ai_identifier(sql, table_name));
+    for (int64_t i = 0; OB_SUCC(ret) && i < defs.count(); ++i) {
+      AIColumnDef *def = defs.at(i);
+      if (OB_ISNULL(def)) {
+        ret = OB_ERR_UNEXPECTED;
+      } else {
+        const ObString *names[] = {&def->column_name_, &def->state_column_name_,
+                                   &def->request_column_name_, &def->result_spec_column_name_};
+        for (int64_t j = 0; OB_SUCC(ret) && j < ARRAYSIZEOF(names); ++j) {
+          OZ(sql.append(0 == i && 0 == j ? " DROP COLUMN " : ", DROP COLUMN "));
+          OZ(append_ai_identifier(sql, *names[j]));
+        }
+      }
+    }
+    if (OB_SUCC(ret) && !defs.empty()) {
+      OZ(proxy->write(sql.ptr(), affected_rows));
+    }
+  }
+  return ret;
+}
+
+static int rollback_created_ai_table(const ObString &database_name,
+                                     const ObString &table_name,
+                                     const uint64_t table_id,
+                                     const ObIArray<AIColumnDef *> &defs,
+                                     const int64_t trigger_version)
+{
+  int ret = OB_SUCCESS;
+  int tmp_ret = drop_ai_column_trigger_set(database_name, table_id, trigger_version);
+  LOG_WARN_RET(tmp_ret, "failed to remove partial AI column triggers", K(table_id));
+  tmp_ret = remove_ai_column_metadata(table_id, defs);
+  LOG_WARN_RET(tmp_ret, "failed to remove partial AI column metadata", K(table_id));
+  ObMySQLProxy *proxy = GCTX.sql_proxy_;
+  ObSqlString sql;
+  int64_t affected_rows = 0;
+  if (OB_ISNULL(proxy)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else {
+    OZ(sql.append("DROP TABLE IF EXISTS "));
+    OZ(append_ai_identifier(sql, database_name));
+    OZ(sql.append("."));
+    OZ(append_ai_identifier(sql, table_name));
     OZ(proxy->write(sql.ptr(), affected_rows));
   }
   return ret;
@@ -956,6 +1207,7 @@ int ObCreateTableExecutor::execute(ObExecContext &ctx, ObCreateTableStmt &stmt)
   ObSelectStmt *select_stmt = stmt.get_sub_select();
   ObTableSchema &table_schema = create_table_arg.schema_;
   ObSQLSessionInfo *my_session = ctx.get_my_session();
+  bool ai_table_created = false;
   
   if (OB_ISNULL(my_session)) {
     ret = OB_ERR_UNEXPECTED;
@@ -992,6 +1244,7 @@ int ObCreateTableExecutor::execute(ObExecContext &ctx, ObCreateTableStmt &stmt)
         if (OB_FAIL(ObDDLExecutorUtil::execute_pcreate_table(
             my_session, ctx.root_command_service(), "[parallel create table]",
                                                           create_table_arg, res))) {
+        } else if (FALSE_IT(ai_table_created = !stmt.get_ai_column_defs().empty())) {
         } else if (OB_FAIL(register_ai_columns(*my_session, stmt.get_ai_column_defs(),
                                                res.table_id_, res.schema_version_))) {
         } else if (FALSE_IT(table_schema.set_table_id(res.table_id_))) {
@@ -1003,6 +1256,15 @@ int ObCreateTableExecutor::execute(ObExecContext &ctx, ObCreateTableStmt &stmt)
     } else {
       if (OB_FAIL(execute_ctas(ctx, stmt))){
       }
+    }
+    if (OB_FAIL(ret) && ai_table_created) {
+      const int saved_ret = ret;
+      const int cleanup_ret = rollback_created_ai_table(stmt.get_database_name(),
+                                                         stmt.get_table_name(), res.table_id_,
+                                                         stmt.get_ai_column_defs(),
+                                                         res.schema_version_);
+      LOG_WARN_RET(cleanup_ret, "failed to roll back AI column CREATE", K(res.table_id_));
+      ret = saved_ret;
     }
     SERVER_EVENT_ADD("ddl", "create table execute finish",
       "ret", ret,
@@ -1384,12 +1646,16 @@ int ObAlterTableExecutor::execute(ObExecContext &ctx, ObAlterTableStmt &stmt)
     if (OB_SUCC(ret) && !stmt.get_ai_column_defs().empty()) {
       const uint64_t table_id = alter_table_arg.alter_table_schema_.get_table_id();
       const ObTableSchema *table_schema = NULL;
+      ObSEArray<AIColumnDef *, 8> all_defs;
+      int64_t previous_trigger_version = 0;
       SMART_VAR(ObSchemaGetterGuard, guard) {
         if (OB_FAIL(refresh_schema_for_table())) {
         } else if (OB_FAIL(ObMultiVersionSchemaService::get_instance().get_runtime_schema_guard(guard))) {
         } else if (OB_FAIL(guard.get_table_schema(table_id, table_schema))) {
         } else if (OB_ISNULL(table_schema)) {
           ret = OB_TABLE_NOT_EXIST;
+        } else if (OB_FAIL(load_ai_columns(table_id, *table_schema, allocator, all_defs,
+                                           previous_trigger_version))) {
         }
         for (int64_t i = 0; OB_SUCC(ret) && i < stmt.get_ai_column_defs().count(); ++i) {
           AIColumnDef *def = stmt.get_ai_column_defs().at(i);
@@ -1410,15 +1676,31 @@ int ObAlterTableExecutor::execute(ObExecContext &ctx, ObAlterTableStmt &stmt)
             def->result_spec_column_id_ = result_spec_col->get_column_id();
           }
         }
+        if (OB_SUCC(ret)) {
+          ret = register_ai_columns(*my_session, stmt.get_ai_column_defs(),
+                                    table_id, res.schema_version_);
+        }
+        for (int64_t i = 0; OB_SUCC(ret) && i < stmt.get_ai_column_defs().count(); ++i) {
+          OZ(all_defs.push_back(stmt.get_ai_column_defs().at(i)));
+        }
+        if (OB_SUCC(ret)) {
+          ret = install_ai_column_triggers(all_defs,
+                                           stmt.get_org_database_name(), stmt.get_org_table_name(),
+                                           *table_schema, res.schema_version_);
+        }
+        if (OB_SUCC(ret) && previous_trigger_version > 0) {
+          OZ(drop_ai_column_trigger_set(stmt.get_org_database_name(), table_id,
+                                        previous_trigger_version));
+        }
       }
-      if (OB_SUCC(ret)) {
-        ret = register_ai_columns(*my_session, stmt.get_ai_column_defs(),
-                                  table_id, res.schema_version_);
-      }
-      if (OB_SUCC(ret)) {
-        ret = install_ai_column_triggers(stmt.get_ai_column_defs(),
-                                         stmt.get_org_database_name(), stmt.get_org_table_name(),
-                                         *table_schema, res.schema_version_);
+      if (OB_FAIL(ret)) {
+        const int saved_ret = ret;
+        const int cleanup_ret = rollback_added_ai_columns(stmt.get_org_database_name(),
+                                                           stmt.get_org_table_name(), table_id,
+                                                           stmt.get_ai_column_defs(),
+                                                           res.schema_version_);
+        LOG_WARN_RET(cleanup_ret, "failed to roll back AI column ALTER", K(table_id));
+        ret = saved_ret;
       }
     }
     char table_info_buffer[256];

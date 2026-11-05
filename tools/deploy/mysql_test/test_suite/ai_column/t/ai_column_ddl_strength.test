@@ -1,0 +1,102 @@
+connection default;
+--exec python3 mysql_test/test_suite/ai_column/include/ai_column_mock.py start 19125
+--disable_warnings
+drop database if exists ai_column_ddl_strength;
+--enable_warnings
+create database ai_column_ddl_strength;
+--error 0,11112
+call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('ddl_strength_ep');
+--error 0,11118
+call DBMS_AI_SERVICE.DROP_AI_MODEL('ddl_strength_model');
+call DBMS_AI_SERVICE.CREATE_AI_MODEL('ddl_strength_model',
+  '{"type":"completion","model_name":"mock-complete"}');
+call DBMS_AI_SERVICE.CREATE_AI_MODEL_ENDPOINT('ddl_strength_ep',
+  '{"ai_model_name":"ddl_strength_model","url":"http://127.0.0.1:19125/v1/chat/completions","access_key":"test","provider":"openai","request_model_name":"mock-complete"}');
+
+create table ai_column_ddl_strength.docs(
+  id bigint primary key,
+  content varchar(200)
+);
+alter table ai_column_ddl_strength.docs add column first_result varchar(400) AI COLUMN (
+  AI_COMPLETE('ddl_strength_model', content)
+) WITH (sync_mode='async', max_retries=1);
+alter table ai_column_ddl_strength.docs add column second_result bigint AI COLUMN (
+  AI_COMPLETE('ddl_strength_model', concat('Score: ', content))
+) WITH (sync_mode='async', max_retries=1);
+
+select count(*) = 2 as sequential_add_metadata
+from oceanbase.__all_ai_column a
+join oceanbase.__all_table t on t.table_id = a.table_id
+join oceanbase.__all_database d on d.database_id = t.database_id
+where d.database_name = 'ai_column_ddl_strength' and t.table_name = 'docs';
+select count(*) = 5 as one_active_trigger_set
+from information_schema.triggers
+where trigger_schema = 'ai_column_ddl_strength' and event_object_table = 'docs';
+
+insert into ai_column_ddl_strength.docs(id, content) values(1, 'initial');
+let $retry = 150;
+let $ready = 0;
+while ($retry)
+{
+  let $ready = `select ifnull(first_result = 'mock:initial' and second_result = 7, 0)
+                from ai_column_ddl_strength.docs where id = 1`;
+  if ($ready == 1)
+  {
+    let $retry = 0;
+  }
+  if ($ready == 0)
+  {
+    --real_sleep 0.1
+    dec $retry;
+  }
+}
+eval select $ready = 1 as both_added_columns_run;
+
+--error 1235
+alter table ai_column_ddl_strength.docs add column bad_result varchar(400) AI COLUMN (
+  AI_COMPLETE('ddl_strength_model', first_result)
+);
+select count(*) = 2 as failed_add_keeps_metadata
+from oceanbase.__all_ai_column a
+join oceanbase.__all_table t on t.table_id = a.table_id
+join oceanbase.__all_database d on d.database_id = t.database_id
+where d.database_name = 'ai_column_ddl_strength' and t.table_name = 'docs';
+select count(*) = 0 as failed_add_leaves_no_column
+from information_schema.columns
+where table_schema = 'ai_column_ddl_strength' and table_name = 'docs'
+  and column_name = 'bad_result';
+
+--error 1235
+alter table ai_column_ddl_strength.docs modify column first_result varchar(400) AI COLUMN (
+  AI_COMPLETE('ddl_strength_model', content)
+) WITH (sync_mode='async', max_retries=1);
+select count(*) = 2 as rejected_modify_keeps_metadata
+from oceanbase.__all_ai_column a
+join oceanbase.__all_table t on t.table_id = a.table_id
+join oceanbase.__all_database d on d.database_id = t.database_id
+where d.database_name = 'ai_column_ddl_strength' and t.table_name = 'docs';
+
+update ai_column_ddl_strength.docs set content = 'updated' where id = 1;
+let $retry = 150;
+let $ready = 0;
+while ($retry)
+{
+  let $ready = `select ifnull(first_result = 'mock:updated' and second_result = 7, 0)
+                from ai_column_ddl_strength.docs where id = 1`;
+  if ($ready == 1)
+  {
+    let $retry = 0;
+  }
+  if ($ready == 0)
+  {
+    --real_sleep 0.1
+    dec $retry;
+  }
+}
+eval select $ready = 1 as rebuilt_triggers_cover_all_columns;
+
+drop table ai_column_ddl_strength.docs;
+call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('ddl_strength_ep');
+call DBMS_AI_SERVICE.DROP_AI_MODEL('ddl_strength_model');
+drop database ai_column_ddl_strength;
+--exec python3 mysql_test/test_suite/ai_column/include/ai_column_mock.py stop 19125

@@ -2490,6 +2490,7 @@ all_ai_column_task_def = dict(
       ('column_id', 'int', 'false'),
       ('rowkey_predicate', 'varchar:2048', 'false'),
       ('eligible_ts', 'timestamp', 'false'),
+      ('lease_owner', 'varchar:64', 'true'),
       ('request_id', 'varchar:64', 'false'),
       ('state', 'int', 'false'),
       ('retry_count', 'int', 'false'),

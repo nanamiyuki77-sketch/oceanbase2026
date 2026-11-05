@@ -1,0 +1,81 @@
+# User DML cannot assign AI result columns; trusted worker writes remain valid.
+
+connection default;
+--exec python3 mysql_test/test_suite/ai_column/include/ai_column_mock.py start 19125
+--disable_query_log
+--disable_warnings
+drop database if exists ai_column_write_protect;
+--enable_warnings
+create database ai_column_write_protect;
+--error 0,11112
+call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('write_protect_ep');
+--error 0,11118
+call DBMS_AI_SERVICE.DROP_AI_MODEL('write_protect_model');
+call DBMS_AI_SERVICE.CREATE_AI_MODEL('write_protect_model',
+  '{"type":"completion","model_name":"mock-complete"}');
+call DBMS_AI_SERVICE.CREATE_AI_MODEL_ENDPOINT('write_protect_ep',
+  '{"ai_model_name":"write_protect_model","url":"http://127.0.0.1:19125/v1/chat/completions","access_key":"write-protect-key","provider":"openai","request_model_name":"mock-complete"}');
+create table ai_column_write_protect.docs(
+  id bigint primary key,
+  content varchar(200),
+  result varchar(200) AI COLUMN (
+    AI_COMPLETE('write_protect_model', content)
+  ) WITH (sync_mode='async', max_retries=1)
+);
+--enable_query_log
+
+--error 3105
+insert into ai_column_write_protect.docs(id, content, result)
+values(1, 'explicit-value', 'manual');
+--error 3105
+insert into ai_column_write_protect.docs(id, content, result)
+values(1, 'explicit-null', null);
+--error 3105
+insert into ai_column_write_protect.docs(id, content, result)
+values(1, 'explicit-default', default);
+
+insert into ai_column_write_protect.docs(id, content) values(1, 'allowed');
+let $retry = 150;
+let $ready = 0;
+while ($retry)
+{
+  let $ready = `select ifnull(result = 'mock:allowed', 0)
+                from ai_column_write_protect.docs where id = 1`;
+  if ($ready == 1) { let $retry = 0; }
+  if ($ready == 0) {
+    --real_sleep 0.1
+    dec $retry; }
+}
+eval select $ready = 1 as trusted_worker_write_succeeds;
+
+--error 3105
+update ai_column_write_protect.docs set result = 'manual' where id = 1;
+--error 3105
+update ai_column_write_protect.docs set result = null where id = 1;
+--error 3105
+update ai_column_write_protect.docs set result = default where id = 1;
+--error 3105
+insert into ai_column_write_protect.docs(id, content) values(1, 'duplicate')
+on duplicate key update result = 'manual';
+
+update ai_column_write_protect.docs set content = 'regenerated' where id = 1;
+let $retry = 150;
+let $ready = 0;
+while ($retry)
+{
+  let $ready = `select ifnull(result = 'mock:regenerated', 0)
+                from ai_column_write_protect.docs where id = 1`;
+  if ($ready == 1) { let $retry = 0; }
+  if ($ready == 0) {
+    --real_sleep 0.1
+    dec $retry; }
+}
+eval select $ready = 1 as dependency_update_and_worker_write_succeed;
+
+--disable_query_log
+drop table ai_column_write_protect.docs;
+call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('write_protect_ep');
+call DBMS_AI_SERVICE.DROP_AI_MODEL('write_protect_model');
+drop database ai_column_write_protect;
+--exec python3 mysql_test/test_suite/ai_column/include/ai_column_mock.py stop 19125
+--enable_query_log

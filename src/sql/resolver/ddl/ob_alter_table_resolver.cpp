@@ -3467,6 +3467,31 @@ int ObAlterTableResolver::add_ai_column_hidden_columns(AIColumnDef &def)
 {
   int ret = OB_SUCCESS;
   ObAlterTableStmt *alter_stmt = get_alter_table_stmt();
+  for (int64_t i = 0; OB_SUCC(ret) && i < def.dependency_names_.count(); ++i) {
+    const ObString &dependency = def.dependency_names_.at(i);
+    const ObColumnSchemaV2 *dependency_col = table_schema_->get_column_schema(dependency);
+    bool depends_on_ai_column = false;
+    for (int64_t j = 0; !depends_on_ai_column && j < alter_stmt->get_ai_column_defs().count(); ++j) {
+      const AIColumnDef *other = alter_stmt->get_ai_column_defs().at(j);
+      depends_on_ai_column = OB_NOT_NULL(other)
+          && &def != other && 0 == dependency.case_compare(other->column_name_);
+    }
+    if (!depends_on_ai_column && OB_NOT_NULL(dependency_col)) {
+      char marker[OB_MAX_COLUMN_NAME_LENGTH + 1];
+      int len = snprintf(marker, sizeof(marker), "__ai_%lu_state", dependency_col->get_column_id());
+      depends_on_ai_column = len > 0 && len < static_cast<int>(sizeof(marker))
+          && OB_NOT_NULL(table_schema_->get_column_schema(ObString(len, marker)));
+      if (!depends_on_ai_column) {
+        len = snprintf(marker, sizeof(marker), "__ai_%lu_state", dependency.hash());
+        depends_on_ai_column = len > 0 && len < static_cast<int>(sizeof(marker))
+            && OB_NOT_NULL(table_schema_->get_column_schema(ObString(len, marker)));
+      }
+    }
+    if (depends_on_ai_column) {
+      ret = OB_NOT_SUPPORTED;
+      LOG_USER_ERROR(OB_NOT_SUPPORTED, "AI column depending on another AI column");
+    }
+  }
   for (int kind = 0; OB_SUCC(ret) && kind < 3; ++kind) {
     AlterColumnSchema hidden;
     char name[OB_MAX_COLUMN_NAME_LENGTH + 1];
@@ -3979,6 +4004,7 @@ int ObAlterTableResolver::resolve_change_column(const ParseNode &node)
     //resolve new column definition
     if (OB_SUCC(ret)) {
       ObColumnResolveStat stat;
+      const int64_t ai_def_count = alter_table_stmt->get_ai_column_defs().count();
       alter_column_schema.set_column_flags(origin_col_schema->get_column_flags());
       //alter column's generated column flag should be parsed by itself,
       // So need to clear the generated column flag that was previously copied
@@ -3993,6 +4019,9 @@ int ObAlterTableResolver::resolve_change_column(const ParseNode &node)
       ObSEArray<ObColumnSchemaV2 *, 8> resolved_cols;
       if (OB_FAIL(get_table_schema_all_column_schema(resolved_cols, alter_table_stmt->get_alter_table_schema()))) {
       } else if (OB_FAIL(resolve_alter_table_column_definition(alter_column_schema, node.children_[1], stat, is_modify_column_visibility, resolved_cols))) {
+      } else if (ai_def_count < alter_table_stmt->get_ai_column_defs().count()) {
+        ret = OB_NOT_SUPPORTED;
+        LOG_USER_ERROR(OB_NOT_SUPPORTED, "ALTER CHANGE AI COLUMN is");
       } else if (!stat.is_primary_key_ && OB_FAIL(resolve_alter_column_not_null(alter_column_schema, *origin_col_schema))) {
       } else {
         //TODO(xiyu):hanlde change column c2 c3 int unique key; support unique key
@@ -4160,12 +4189,16 @@ int ObAlterTableResolver::resolve_modify_column(const ParseNode &node,
       if (OB_SUCC(ret)) {
         ObSEArray<ObColumnSchemaV2 *, 8> resolved_cols;
         bool allow_has_default = true;
+        const int64_t ai_def_count = alter_table_stmt->get_ai_column_defs().count();
         if (OB_FAIL(get_table_schema_all_column_schema(resolved_cols, alter_table_stmt->get_alter_table_schema()))) {
         } else if (OB_FAIL(resolve_alter_table_column_definition(
                     alter_column_schema, node.children_[i], stat, is_modify_column_visibility,
                     resolved_cols,
                     false,
                     allow_has_default))) {
+        } else if (ai_def_count < alter_table_stmt->get_ai_column_defs().count()) {
+          ret = OB_NOT_SUPPORTED;
+          LOG_USER_ERROR(OB_NOT_SUPPORTED, "ALTER MODIFY AI COLUMN is");
         } else if (!stat.is_primary_key_ &&
                    OB_FAIL(resolve_alter_column_not_null(alter_column_schema, *origin_col_schema))) {
         }

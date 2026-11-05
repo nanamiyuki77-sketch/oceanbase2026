@@ -1,0 +1,81 @@
+connection default;
+--exec python3 mysql_test/test_suite/ai_column/include/ai_column_fault_mock.py start 19126
+--disable_query_log
+--disable_result_log
+drop database if exists ai_column_faults;
+create database ai_column_faults;
+
+call DBMS_AI_SERVICE.CREATE_AI_MODEL('fault_429', '{"type":"completion","model_name":"fault"}');
+call DBMS_AI_SERVICE.CREATE_AI_MODEL('fault_500', '{"type":"completion","model_name":"fault"}');
+call DBMS_AI_SERVICE.CREATE_AI_MODEL('fault_503', '{"type":"completion","model_name":"fault"}');
+call DBMS_AI_SERVICE.CREATE_AI_MODEL('fault_disconnect', '{"type":"completion","model_name":"fault"}');
+call DBMS_AI_SERVICE.CREATE_AI_MODEL('fault_lost', '{"type":"completion","model_name":"fault"}');
+call DBMS_AI_SERVICE.CREATE_AI_MODEL('fault_timeout', '{"type":"completion","model_name":"fault"}');
+call DBMS_AI_SERVICE.CREATE_AI_MODEL_ENDPOINT('fault_429_ep', '{"ai_model_name":"fault_429","url":"http://127.0.0.1:19126/v1/429-once/completions","access_key":"test","provider":"openai","request_model_name":"fault"}');
+call DBMS_AI_SERVICE.CREATE_AI_MODEL_ENDPOINT('fault_500_ep', '{"ai_model_name":"fault_500","url":"http://127.0.0.1:19126/v1/500-always/completions","access_key":"test","provider":"openai","request_model_name":"fault"}');
+call DBMS_AI_SERVICE.CREATE_AI_MODEL_ENDPOINT('fault_503_ep', '{"ai_model_name":"fault_503","url":"http://127.0.0.1:19126/v1/503-once/completions","access_key":"test","provider":"openai","request_model_name":"fault"}');
+call DBMS_AI_SERVICE.CREATE_AI_MODEL_ENDPOINT('fault_disconnect_ep', '{"ai_model_name":"fault_disconnect","url":"http://127.0.0.1:19126/v1/disconnect-once/completions","access_key":"test","provider":"openai","request_model_name":"fault"}');
+call DBMS_AI_SERVICE.CREATE_AI_MODEL_ENDPOINT('fault_lost_ep', '{"ai_model_name":"fault_lost","url":"http://127.0.0.1:19126/v1/response-lost-once/completions","access_key":"test","provider":"openai","request_model_name":"fault"}');
+call DBMS_AI_SERVICE.CREATE_AI_MODEL_ENDPOINT('fault_timeout_ep', '{"ai_model_name":"fault_timeout","url":"http://127.0.0.1:19126/v1/timeout-once/completions","access_key":"test","provider":"openai","request_model_name":"fault"}');
+
+create table ai_column_faults.t429(id int primary key, input varchar(50), output varchar(100) AI COLUMN (AI_COMPLETE('fault_429', input)) WITH (sync_mode='async', max_retries=1));
+create table ai_column_faults.t500(id int primary key, input varchar(50), output varchar(100) AI COLUMN (AI_COMPLETE('fault_500', input)) WITH (sync_mode='async', max_retries=1));
+create table ai_column_faults.t503(id int primary key, input varchar(50), output varchar(100) AI COLUMN (AI_COMPLETE('fault_503', input)) WITH (sync_mode='async', max_retries=1));
+create table ai_column_faults.tdisconnect(id int primary key, input varchar(50), output varchar(100) AI COLUMN (AI_COMPLETE('fault_disconnect', input)) WITH (sync_mode='async', max_retries=1));
+create table ai_column_faults.tlost(id int primary key, input varchar(50), output varchar(100) AI COLUMN (AI_COMPLETE('fault_lost', input)) WITH (sync_mode='async', max_retries=1));
+create table ai_column_faults.ttimeout(id int primary key, input varchar(50), output varchar(100) AI COLUMN (AI_COMPLETE('fault_timeout', input)) WITH (sync_mode='async', max_retries=1));
+insert into ai_column_faults.t429(id, input) values(1, 'rate');
+insert into ai_column_faults.t500(id, input) values(1, 'server-error');
+insert into ai_column_faults.t503(id, input) values(1, 'unavailable');
+insert into ai_column_faults.tdisconnect(id, input) values(1, 'disconnect');
+insert into ai_column_faults.tlost(id, input) values(1, 'lost-response');
+insert into ai_column_faults.ttimeout(id, input) values(1, 'timeout');
+--enable_result_log
+
+let $retry = 1600;
+let $done = 0;
+while ($retry)
+{
+  let $done = `select
+      (select output = 'mock:rate' from ai_column_faults.t429) and
+      (select output is null from ai_column_faults.t500) and
+      (select count(*) = 0 from oceanbase.__all_ai_column_task task join oceanbase.__all_table t on t.table_id=task.table_id join oceanbase.__all_database d on d.database_id=t.database_id where d.database_name='ai_column_faults' and t.table_name='t500') and
+      (select output = 'mock:unavailable' from ai_column_faults.t503) and
+      (select output = 'mock:disconnect' from ai_column_faults.tdisconnect) and
+      (select output = 'mock:lost-response' from ai_column_faults.tlost) and
+      (select output = 'mock:timeout' from ai_column_faults.ttimeout)`;
+  if ($done == 1)
+  {
+    let $retry = 0;
+  }
+  if ($done == 0)
+  {
+    --real_sleep 0.1
+    dec $retry;
+  }
+}
+--enable_query_log
+eval select $done = 1 as fault_matrix_database_state;
+--exec python3 mysql_test/test_suite/ai_column/include/ai_column_fault_mock.py assert 19126 429-once
+--exec python3 mysql_test/test_suite/ai_column/include/ai_column_fault_mock.py assert 19126 500-always
+--exec python3 mysql_test/test_suite/ai_column/include/ai_column_fault_mock.py assert 19126 503-once
+--exec python3 mysql_test/test_suite/ai_column/include/ai_column_fault_mock.py assert 19126 disconnect-once
+--exec python3 mysql_test/test_suite/ai_column/include/ai_column_fault_mock.py assert 19126 response-lost-once
+--exec python3 mysql_test/test_suite/ai_column/include/ai_column_fault_mock.py assert 19126 timeout-once
+
+--disable_query_log
+--disable_result_log
+drop database ai_column_faults;
+call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('fault_429_ep');
+call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('fault_500_ep');
+call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('fault_503_ep');
+call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('fault_disconnect_ep');
+call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('fault_lost_ep');
+call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('fault_timeout_ep');
+call DBMS_AI_SERVICE.DROP_AI_MODEL('fault_429');
+call DBMS_AI_SERVICE.DROP_AI_MODEL('fault_500');
+call DBMS_AI_SERVICE.DROP_AI_MODEL('fault_503');
+call DBMS_AI_SERVICE.DROP_AI_MODEL('fault_disconnect');
+call DBMS_AI_SERVICE.DROP_AI_MODEL('fault_lost');
+call DBMS_AI_SERVICE.DROP_AI_MODEL('fault_timeout');
+--exec python3 mysql_test/test_suite/ai_column/include/ai_column_fault_mock.py stop 19126

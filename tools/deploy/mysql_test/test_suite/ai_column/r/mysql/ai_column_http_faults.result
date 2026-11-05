@@ -1,0 +1,9 @@
+select 1 = 1 as fault_matrix_database_state;
+fault_matrix_database_state
+1
+fault_429_once=ok
+fault_500_always=ok
+fault_503_once=ok
+fault_disconnect_once=ok
+fault_response_lost_once=ok
+fault_timeout_once=ok

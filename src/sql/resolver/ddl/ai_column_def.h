@@ -28,7 +28,7 @@ namespace sql
 struct AIColumnDef
 {
   AIColumnDef()
-      : max_retries_(0), column_id_(common::OB_INVALID_ID),
+      : max_retries_(0), definition_version_(0), column_id_(common::OB_INVALID_ID),
         state_column_id_(common::OB_INVALID_ID), request_column_id_(common::OB_INVALID_ID),
         result_spec_column_id_(common::OB_INVALID_ID), result_type_(common::ObNullType),
         vector_dimension_(0), is_embedding_(false)
@@ -43,6 +43,7 @@ struct AIColumnDef
   common::ObString execution_expression_;
   common::ObSEArray<common::ObString, 4> dependency_names_;
   int64_t max_retries_;
+  int64_t definition_version_;
   uint64_t column_id_;
   uint64_t state_column_id_;
   uint64_t request_column_id_;

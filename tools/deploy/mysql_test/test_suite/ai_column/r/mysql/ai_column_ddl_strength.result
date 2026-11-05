@@ -1,0 +1,70 @@
+drop database if exists ai_column_ddl_strength;
+create database ai_column_ddl_strength;
+call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('ddl_strength_ep');
+call DBMS_AI_SERVICE.DROP_AI_MODEL('ddl_strength_model');
+call DBMS_AI_SERVICE.CREATE_AI_MODEL('ddl_strength_model',
+'{"type":"completion","model_name":"mock-complete"}');
+call DBMS_AI_SERVICE.CREATE_AI_MODEL_ENDPOINT('ddl_strength_ep',
+'{"ai_model_name":"ddl_strength_model","url":"http://127.0.0.1:19125/v1/chat/completions","access_key":"test","provider":"openai","request_model_name":"mock-complete"}');
+create table ai_column_ddl_strength.docs(
+id bigint primary key,
+content varchar(200)
+);
+alter table ai_column_ddl_strength.docs add column first_result varchar(400) AI COLUMN (
+AI_COMPLETE('ddl_strength_model', content)
+) WITH (sync_mode='async', max_retries=1);
+alter table ai_column_ddl_strength.docs add column second_result bigint AI COLUMN (
+AI_COMPLETE('ddl_strength_model', concat('Score: ', content))
+) WITH (sync_mode='async', max_retries=1);
+select count(*) = 2 as sequential_add_metadata
+from oceanbase.__all_ai_column a
+join oceanbase.__all_table t on t.table_id = a.table_id
+join oceanbase.__all_database d on d.database_id = t.database_id
+where d.database_name = 'ai_column_ddl_strength' and t.table_name = 'docs';
+sequential_add_metadata
+1
+select count(*) = 5 as one_active_trigger_set
+from information_schema.triggers
+where trigger_schema = 'ai_column_ddl_strength' and event_object_table = 'docs';
+one_active_trigger_set
+1
+insert into ai_column_ddl_strength.docs(id, content) values(1, 'initial');
+select 1 = 1 as both_added_columns_run;
+both_added_columns_run
+1
+alter table ai_column_ddl_strength.docs add column bad_result varchar(400) AI COLUMN (
+AI_COMPLETE('ddl_strength_model', first_result)
+);
+ERROR 0A000: AI column depending on another AI column not supported
+select count(*) = 2 as failed_add_keeps_metadata
+from oceanbase.__all_ai_column a
+join oceanbase.__all_table t on t.table_id = a.table_id
+join oceanbase.__all_database d on d.database_id = t.database_id
+where d.database_name = 'ai_column_ddl_strength' and t.table_name = 'docs';
+failed_add_keeps_metadata
+1
+select count(*) = 0 as failed_add_leaves_no_column
+from information_schema.columns
+where table_schema = 'ai_column_ddl_strength' and table_name = 'docs'
+  and column_name = 'bad_result';
+failed_add_leaves_no_column
+1
+alter table ai_column_ddl_strength.docs modify column first_result varchar(400) AI COLUMN (
+AI_COMPLETE('ddl_strength_model', content)
+) WITH (sync_mode='async', max_retries=1);
+ERROR 0A000: ALTER MODIFY AI COLUMN is not supported
+select count(*) = 2 as rejected_modify_keeps_metadata
+from oceanbase.__all_ai_column a
+join oceanbase.__all_table t on t.table_id = a.table_id
+join oceanbase.__all_database d on d.database_id = t.database_id
+where d.database_name = 'ai_column_ddl_strength' and t.table_name = 'docs';
+rejected_modify_keeps_metadata
+1
+update ai_column_ddl_strength.docs set content = 'updated' where id = 1;
+select 1 = 1 as rebuilt_triggers_cover_all_columns;
+rebuilt_triggers_cover_all_columns
+1
+drop table ai_column_ddl_strength.docs;
+call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('ddl_strength_ep');
+call DBMS_AI_SERVICE.DROP_AI_MODEL('ddl_strength_model');
+drop database ai_column_ddl_strength;

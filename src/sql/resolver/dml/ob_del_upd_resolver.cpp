@@ -34,6 +34,56 @@ using namespace pl;
 namespace sql
 {
 
+namespace
+{
+bool has_ai_column_marker(const ObTableSchema &table_schema,
+                          const ObColumnSchemaV2 &column_schema)
+{
+  char marker_name[OB_MAX_COLUMN_NAME_LENGTH + 1];
+  const int id_len = snprintf(marker_name, sizeof(marker_name),
+                              "__ai_%lu_state", column_schema.get_column_id());
+  const ObColumnSchemaV2 *marker = id_len > 0 && id_len < static_cast<int>(sizeof(marker_name))
+      ? table_schema.get_column_schema(ObString(id_len, marker_name)) : NULL;
+  if (OB_ISNULL(marker)) {
+    const int hash_len = snprintf(marker_name, sizeof(marker_name), "__ai_%lu_state",
+                                  column_schema.get_column_name_str().hash());
+    marker = hash_len > 0 && hash_len < static_cast<int>(sizeof(marker_name))
+        ? table_schema.get_column_schema(ObString(hash_len, marker_name)) : NULL;
+  }
+  return OB_NOT_NULL(marker) && marker->is_hidden();
+}
+
+int check_ai_result_column_assignment(ObSchemaChecker *schema_checker,
+                                      const ObSQLSessionInfo *session,
+                                      const TableItem &table,
+                                      const ObColumnRefRawExpr &column)
+{
+  int ret = OB_SUCCESS;
+  const ObTableSchema *table_schema = NULL;
+  const ObColumnSchemaV2 *column_schema = NULL;
+  if (OB_ISNULL(schema_checker) || OB_ISNULL(session)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (!session->is_user_session() || session->get_ddl_info().is_ddl()) {
+  } else if (OB_FAIL(schema_checker->get_table_schema(table.get_base_table_item().ref_id_,
+                                                       table_schema))) {
+  } else if (OB_ISNULL(table_schema)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (OB_ISNULL(column_schema = table_schema->get_column_schema(column.get_column_id()))) {
+    column_schema = table_schema->get_column_schema(column.get_column_name());
+  }
+  if (OB_SUCC(ret) && OB_NOT_NULL(column_schema)
+      && has_ai_column_marker(*table_schema, *column_schema)) {
+    ret = OB_NON_DEFAULT_VALUE_FOR_GENERATED_COLUMN;
+    const ObString &column_name = column.get_column_name();
+    const ObString &table_name = column.get_table_name();
+    LOG_USER_ERROR(OB_NON_DEFAULT_VALUE_FOR_GENERATED_COLUMN,
+                   column_name.length(), column_name.ptr(),
+                   table_name.length(), table_name.ptr());
+  }
+  return ret;
+}
+} // namespace
+
 int ObTableAssignment::expand_expr(ObRawExprFactory &expr_factory,
                                    const ObIArray<ObAssignment> &assigns,
                                    ObRawExpr *&expr)
@@ -118,6 +168,9 @@ int ObDelUpdResolver::resolve_assignments(const ParseNode &parse_node,
             }
           }
         }
+      }
+      if (OB_SUCC(ret) && OB_FAIL(check_ai_result_column_assignment(
+              schema_checker_, session_info_, *table, *ref_expr))) {
       }
       if (OB_SUCC(ret) && T_INSERT_SCOPE == scope) {
         if (OB_FAIL(mock_values_column_ref(ref_expr))) {
@@ -2170,6 +2223,8 @@ int ObDelUpdResolver::resolve_insert_columns(const ParseNode *node,
       } else if (!session_info_->get_ddl_info().is_ddl() && OB_HIDDEN_SESS_CREATE_TIME_COLUMN_ID == column_expr->get_column_id()) {
         ret = OB_NOT_SUPPORTED;
         LOG_USER_ERROR(OB_NOT_SUPPORTED, "specify __sess_create_time value");
+      } else if (OB_FAIL(check_ai_result_column_assignment(
+                     schema_checker_, session_info_, *table_item, *column_expr))) {
       } else if (OB_FAIL(mock_values_column_ref(column_expr))) {
       }
     }//end for
@@ -2199,6 +2254,9 @@ int ObDelUpdResolver::resolve_insert_columns(const ParseNode *node,
           ret = OB_ERR_FIELD_SPECIFIED_TWICE;
           ObCStringHelper helper;
           LOG_USER_ERROR(OB_ERR_FIELD_SPECIFIED_TWICE, helper.convert(column_items.at(i).column_name_));
+        } else if (OB_FAIL(check_ai_result_column_assignment(
+                       schema_checker_, session_info_, *table_item,
+                       *column_items.at(i).expr_))) {
         } else if (OB_FAIL(mock_values_column_ref(column_items.at(i).expr_))) {
         }
       }

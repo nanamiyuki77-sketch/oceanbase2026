@@ -1,0 +1,26 @@
+insert into ai_column_write_protect.docs(id, content, result)
+values(1, 'explicit-value', 'manual');
+ERROR HY000: The value specified for generated column 'result' in table 'docs' is not allowed
+insert into ai_column_write_protect.docs(id, content, result)
+values(1, 'explicit-null', null);
+ERROR HY000: The value specified for generated column 'result' in table 'docs' is not allowed
+insert into ai_column_write_protect.docs(id, content, result)
+values(1, 'explicit-default', default);
+ERROR HY000: The value specified for generated column 'result' in table 'docs' is not allowed
+insert into ai_column_write_protect.docs(id, content) values(1, 'allowed');
+select 1 = 1 as trusted_worker_write_succeeds;
+trusted_worker_write_succeeds
+1
+update ai_column_write_protect.docs set result = 'manual' where id = 1;
+ERROR HY000: The value specified for generated column 'result' in table 'docs' is not allowed
+update ai_column_write_protect.docs set result = null where id = 1;
+ERROR HY000: The value specified for generated column 'result' in table 'docs' is not allowed
+update ai_column_write_protect.docs set result = default where id = 1;
+ERROR HY000: The value specified for generated column 'result' in table 'docs' is not allowed
+insert into ai_column_write_protect.docs(id, content) values(1, 'duplicate')
+on duplicate key update result = 'manual';
+ERROR HY000: The value specified for generated column 'result' in table 'docs' is not allowed
+update ai_column_write_protect.docs set content = 'regenerated' where id = 1;
+select 1 = 1 as dependency_update_and_worker_write_succeed;
+dependency_update_and_worker_write_succeed
+1
