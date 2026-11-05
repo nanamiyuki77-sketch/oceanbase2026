@@ -38,21 +38,30 @@ inline lib::ObMutex &root_service_serial_mutex()
 }
 
 // Lock acquisition obeys the caller's worker deadline. The callable executes
-// under the process-wide Root Service serialization lock and returns an OceanBase
-// error code.
+// under the supplied serialization lock and returns an OceanBase error code.
 template <typename F>
-inline int serialize_root_service_call(F &&fn)
+inline int serialize_service_call(lib::ObMutex &mutex, F &&fn)
 {
-  int ret = root_service_serial_mutex().lock(THIS_WORKER.get_timeout_ts());
+  int ret = mutex.lock(THIS_WORKER.get_timeout_ts());
   if (OB_SUCCESS != ret) {
   } else {
     struct UnlockGuard
     {
-      ~UnlockGuard() { root_service_serial_mutex().unlock(); }
-    } guard;
+      explicit UnlockGuard(lib::ObMutex &mutex) : mutex_(mutex) {}
+      ~UnlockGuard() { mutex_.unlock(); }
+      lib::ObMutex &mutex_;
+    } guard(mutex);
     ret = fn();
   }
   return ret;
+}
+
+// General Root Service commands retain the former process-wide serialization
+// policy used by the single-threaded RPC queue.
+template <typename F>
+inline int serialize_root_service_call(F &&fn)
+{
+  return serialize_service_call(root_service_serial_mutex(), fn);
 }
 
 } // namespace query

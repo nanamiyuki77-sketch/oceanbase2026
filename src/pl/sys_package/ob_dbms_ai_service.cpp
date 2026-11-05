@@ -33,6 +33,37 @@ namespace oceanbase
 namespace pl
 {
 
+namespace
+{
+
+lib::ObMutex &ai_model_ddl_serial_mutex()
+{
+  static lib::ObMutex mutex;
+  return mutex;
+}
+
+template <typename F>
+int serialize_ai_model_ddl_call(F &&fn, const int retry_success_ret)
+{
+  static constexpr int64_t RETRY_INTERVAL_US = 10 * 1000;
+  return query::serialize_service_call(ai_model_ddl_serial_mutex(), [&fn, retry_success_ret]() {
+    int ret = OB_SUCCESS;
+    bool has_retried = false;
+    do {
+      ret = fn();
+      if (has_retried && retry_success_ret == ret) {
+        ret = OB_SUCCESS;
+      } else if (OB_EAGAIN == ret && THIS_WORKER.get_timeout_remain() > RETRY_INTERVAL_US) {
+        has_retried = true;
+        ob_usleep(RETRY_INTERVAL_US);
+      }
+    } while (OB_EAGAIN == ret && THIS_WORKER.get_timeout_remain() > RETRY_INTERVAL_US);
+    return ret;
+  });
+}
+
+} // namespace
+
 int ObDBMSAiService::check_ai_model_privilege_(ObPLExecCtx &ctx, ObPrivSet required_priv)
 {
   int ret = OB_SUCCESS;
@@ -276,8 +307,9 @@ int ObDBMSAiService::create_ai_model(ObPLExecCtx &ctx, sql::ParamStore &params, 
       if (OB_FAIL(arg.check_valid())) {
       } else if (OB_ISNULL(root_commands)) {
         ret = OB_NOT_INIT;
-      } else if (OB_FAIL(query::serialize_root_service_call(
-                           [&]{ return root_commands->create_ai_model(arg); }))) {
+      } else if (OB_FAIL(serialize_ai_model_ddl_call(
+                           [&]{ return root_commands->create_ai_model(arg); },
+                           OB_AI_FUNC_MODEL_EXISTS))) {
       }
     }
 
@@ -325,8 +357,9 @@ int ObDBMSAiService::drop_ai_model(ObPLExecCtx &ctx, sql::ParamStore &params, co
     arg.ddl_stmt_str_ = ctx.exec_ctx_->get_sql_ctx()->cur_sql_;
       if (OB_ISNULL(root_commands)) {
         ret = OB_NOT_INIT;
-      } else if (OB_FAIL(query::serialize_root_service_call(
-                           [&]{ return root_commands->drop_ai_model(arg); }))) {
+      } else if (OB_FAIL(serialize_ai_model_ddl_call(
+                           [&]{ return root_commands->drop_ai_model(arg); },
+                           OB_AI_FUNC_MODEL_NOT_FOUND))) {
     }
 
     LOG_INFO("finished to drop ai model", K(ret), K(params), K(model_name));
