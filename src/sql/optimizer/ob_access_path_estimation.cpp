@@ -1001,11 +1001,21 @@ int ObAccessPathEstimation::process_storage_estimation_result(ObIArray<ObBatchEs
   if (is_reliable) {
     for (int64_t i = 0; OB_SUCC(ret) && i < result_helpers.count(); ++i) {
       AccessPath *path = result_helpers.at(i).path_;
+      double logical_row_count = result_helpers.at(i).result_.logical_row_count_;
+      double physical_row_count = result_helpers.at(i).result_.physical_row_count_;
       bool range_graph_with_exec_param = (path->get_query_range_provider() != NULL &&
                                           path->get_query_range_provider()->has_exec_param());
-      if (result_helpers.at(i).result_.logical_row_count_ >= 0 &&
-          OB_FAIL(estimate_prefix_range_rowcount(result_helpers.at(i).result_.logical_row_count_,
-                                                 result_helpers.at(i).result_.physical_row_count_,
+      if (path->vec_idx_info_.has_vec_index() &&
+          path->vec_idx_info_.vec_extra_info_.is_hnsw_vec_scan()) {
+        // HNSW reads the snapshot plus a delta table where each update is a delete/insert pair.
+        const double snapshot_row_count = path->get_table_row_count() *
+            path->vec_idx_info_.vec_extra_info_.get_selectivity();
+        logical_row_count = snapshot_row_count + logical_row_count / 2.0;
+        physical_row_count = snapshot_row_count + physical_row_count / 2.0;
+      }
+      if (logical_row_count >= 0 &&
+          OB_FAIL(estimate_prefix_range_rowcount(logical_row_count,
+                                                 physical_row_count,
                                                  range_graph_with_exec_param,
                                                  path->est_cost_info_))) {
       } else if (OB_FAIL(fill_cost_table_scan_info(path->est_cost_info_))) {
