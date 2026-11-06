@@ -1033,6 +1033,7 @@ int ObFtsIndexBuilderUtil::generate_doc_id_column(
 
 int ObFtsIndexBuilderUtil::decide_parallelism(
     const share::schema::ObIndexType index_type,
+    const ObString &parser_name,
     const int64_t original_parallelism,
     int64_t &decided_parallelism)
 {
@@ -1048,9 +1049,15 @@ int ObFtsIndexBuilderUtil::decide_parallelism(
         decided_parallelism = MAX(original_parallelism / 3, 1L);
         break;
       case share::schema::ObIndexType::INDEX_TYPE_FTS_INDEX_LOCAL:
-      case share::schema::ObIndexType::INDEX_TYPE_FTS_DOC_WORD_LOCAL:
-        decided_parallelism = MIN(original_parallelism, MAX(original_parallelism / 3, 2L));
+      case share::schema::ObIndexType::INDEX_TYPE_FTS_DOC_WORD_LOCAL: {
+        storage::ObFTParser parser;
+        if (OB_FAIL(parser.parse_from_str(parser_name.ptr(), parser_name.length()))) {
+        } else {
+          const int64_t min_parallelism = parser.is_beng() ? 2L : 1L;
+          decided_parallelism = MIN(original_parallelism, MAX(original_parallelism / 3, min_parallelism));
+        }
         break;
+      }
       case share::schema::ObIndexType::INDEX_TYPE_NORMAL_MULTIVALUE_LOCAL:
       case share::schema::ObIndexType::INDEX_TYPE_UNIQUE_MULTIVALUE_LOCAL:
         decided_parallelism = MAX(original_parallelism / 2, 1L);
