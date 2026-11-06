@@ -60,7 +60,9 @@ private:
   int process_one_group();
 private:
   static constexpr int64_t SCHEDULE_PERIOD = 100L * 1000L;
+  static constexpr int64_t IDLE_SKIP_ROUNDS = 1;
   common::ObArenaAllocator allocator_;
+  int64_t idle_skip_rounds_;
 };
 
 }  // observer

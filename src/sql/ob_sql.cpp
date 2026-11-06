@@ -63,7 +63,10 @@ static bool contains_file_table_function(const ObString &sql)
     const char prev = pos > 0 ? sql.ptr()[pos - 1] : '\0';
     const bool at_identifier_boundary = !(('a' <= prev && prev <= 'z') || ('A' <= prev && prev <= 'Z')
         || ('0' <= prev && prev <= '9') || '_' == prev || '$' == prev);
-    for (int64_t i = 0; at_identifier_boundary && !found && i < ARRAYSIZEOF(NAMES); ++i) {
+    const char first = sql.ptr()[pos];
+    const bool possible_function_start = 'r' == first || 'R' == first || 'g' == first || 'G' == first;
+    for (int64_t i = 0; at_identifier_boundary && possible_function_start
+         && !found && i < ARRAYSIZEOF(NAMES); ++i) {
       const int64_t name_len = STRLEN(NAMES[i]);
       if (pos + name_len <= sql.length()
           && 0 == STRNCASECMP(sql.ptr() + pos, NAMES[i], name_len)) {

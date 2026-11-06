@@ -260,7 +260,7 @@ int ObFTDATReader<DATA_TYPE>::match_with_hit(const ObString &ft_char,
 
   ObFTSingleWord word;
   word.set_word(ft_char.ptr(), ft_char.length());
-  if (OB_FAIL(dat_->get_map()->find(word, code)) && OB_ENTRY_NOT_EXIST != ret) {
+  if (OB_FAIL(map->find(word, code)) && OB_ENTRY_NOT_EXIST != ret) {
   } else if (OB_ENTRY_NOT_EXIST == ret) {
     ret = OB_SUCCESS;
     hit.set_unmatch();
@@ -310,7 +310,8 @@ int ObArrayHashMap::find(const ObFTSingleWord &word, ObFTWordCode &code) const
       ret = OB_SUCCESS;
       break;
     } else {
-      index = (index + 3) % header_.capacity_;
+      index += 3;
+      index = index >= header_.capacity_ ? index - header_.capacity_ : index;
     }
   }
   return ret;
@@ -322,7 +323,8 @@ int ObArrayHashMap::insert(const ObString &key, ObFTWordCode code)
   uint64_t hash = key.hash();
   uint64_t index = hash % header_.capacity_;
   while (header_.data[index].used) {
-    index = (index + 3) % header_.capacity_;
+    index += 3;
+    index = index >= header_.capacity_ ? index - header_.capacity_ : index;
   }
 
   header_.data[index].code = code;

@@ -155,7 +155,8 @@ void ObSqlMemoryTimerTask::runTimerTask()
 }
 
 AIColumnWorkerTask::AIColumnWorkerTask()
-  : allocator_("AIColumnWorker")
+  : allocator_("AIColumnWorker"),
+    idle_skip_rounds_(0)
 {
 }
 
@@ -168,10 +169,15 @@ void AIColumnWorkerTask::runTimerTask()
 {
   if (GCTX.in_bootstrap_ || GCTX.start_service_time_ <= 0) {
     return;
+  } else if (idle_skip_rounds_ > 0) {
+    --idle_skip_rounds_;
+    return;
   }
   allocator_.reset_remain_one_page();
   int ret = process_one_group();
-  if (OB_FAIL(ret) && OB_TABLE_NOT_EXIST != ret && OB_ITER_END != ret) {
+  if (OB_ITER_END == ret) {
+    idle_skip_rounds_ = IDLE_SKIP_ROUNDS;
+  } else if (OB_FAIL(ret) && OB_TABLE_NOT_EXIST != ret) {
     LOG_WARN("failed to process AI column task group", KR(ret));
   }
 }
@@ -203,9 +209,6 @@ int AIColumnWorkerTask::process_one_group()
       } else if (OB_ISNULL(result = res.get_result())) {
         ret = OB_ERR_UNEXPECTED;
       } else if (OB_FAIL(result->next())) {
-        if (OB_ITER_END == ret) {
-          ret = OB_SUCCESS;
-        }
       } else {
         EXTRACT_INT_FIELD_MYSQL(*result, "table_id", table_id, uint64_t);
         EXTRACT_VARCHAR_FIELD_MYSQL(*result, "request_id", tmp_request);

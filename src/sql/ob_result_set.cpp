@@ -387,8 +387,8 @@ int ObResultSet::execute()
       int64_t strict_read = 0;
       if (!is_inner_result_set_ && is_user_sql_
           && (stmt::T_SELECT == stmt_type_ || stmt::T_UPDATE == stmt_type_ || stmt::T_DELETE == stmt_type_)
-          && OB_FAIL(my_session_.get_sys_variable_by_name(
-                         ObString::make_string("ai_column_strict_read"), strict_read))) {
+          && OB_FAIL(my_session_.get_sys_variable(
+                         share::SYS_VAR_AI_COLUMN_STRICT_READ, strict_read))) {
       } else if (0 != strict_read && OB_FAIL(check_ai_column_strict_read(my_session_, *physical_plan_))) {
       } else {
         ret = open_plan();
