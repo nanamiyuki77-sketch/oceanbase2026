@@ -42,7 +42,8 @@ ObSortSpec::ObSortSpec(common::ObIAllocator &alloc, const ObPhyOperatorType type
   prescan_enabled_(false),
   enable_encode_sortkey_opt_(false),
   part_cnt_(0),
-  pd_topn_filter_info_(alloc)
+  pd_topn_filter_info_(alloc),
+  fts_word_equal_(false)
 {}
 
 OB_SERIALIZE_MEMBER((ObSortSpec, ObOpSpec),
@@ -61,7 +62,8 @@ OB_SERIALIZE_MEMBER((ObSortSpec, ObOpSpec),
                     enable_encode_sortkey_opt_,
                     part_cnt_,
                     compress_type_,
-                    pd_topn_filter_info_);
+                    pd_topn_filter_info_,
+                    fts_word_equal_);
 
 ObSortOp::ObSortOp(ObExecContext &ctx_, const ObOpSpec &spec, ObOpInput *input)
   : ObOperator(ctx_, spec, input),
@@ -429,6 +431,7 @@ int ObSortOp::init_sort(int64_t row_count,
     read_func_ = &ObSortOp::sort_impl_next;
   }
   int aqs_head = MY_SPEC.enable_encode_sortkey_opt_ ? sizeof(oceanbase::sql::ObSortOpImpl::AQSItem) : 0;
+  sort_impl_.set_fts_word_equal(MY_SPEC.fts_word_equal_);
   sort_impl_.set_input_rows(row_count);
   sort_impl_.set_input_width(MY_SPEC.width_ + aqs_head);
   sort_impl_.set_operator_type(MY_SPEC.type_);

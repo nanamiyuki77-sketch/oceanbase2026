@@ -169,6 +169,10 @@ public:
       tsc_cg_service_(*this)
   {
   }
+  // Prove the first key is the generated word of the FTS_INDEX being built.
+  static bool is_fts_word_first_sort(ObLogSort &op,
+      const share::schema::ObTableSchema &index_schema,
+      const share::schema::ObTableSchema &data_schema);
   // generate physical plan
   int generate(const ObLogPlan &log_plan, ObPhysicalPlan &phy_plan);
   // !!! Note: The following two interfaces are only used for initializing various expressions in the operator, use with caution elsewhere, if necessary

@@ -1,0 +1,81 @@
+# description: FTS index build/rebuild preserves complete forward and reverse postings.
+# Expected output must be recorded on the pristine baseline, then checked on both builds.
+
+--disable_warnings
+DROP TABLE IF EXISTS fts_sort_byte_equal;
+--enable_warnings
+
+CREATE TABLE fts_sort_byte_equal (
+  id INT PRIMARY KEY,
+  content VARCHAR(400)
+) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+INSERT INTO fts_sort_byte_equal VALUES
+  (1, 'common apple apple'),
+  (2, 'COMMON APPLE banana'),
+  (3, 'common apricot'),
+  (4, 'café common'),
+  (5, 'CAFE common'),
+  (6, ''),
+  (7, NULL),
+  (8, CONCAT('alpha', CHAR(0), 'beta common')),
+  (9, 'common trailing   '),
+  (10, 'alphabetical common'),
+  (11, '中文 common'),
+  (12, 'banana banana common');
+
+CREATE FULLTEXT INDEX fts_sort_be ON fts_sort_byte_equal(content) WITH PARSER beng;
+SET ob_enable_index_direct_select = ON;
+
+--echo first build
+SELECT id FROM fts_sort_byte_equal WHERE MATCH(content) AGAINST('common') ORDER BY id;
+SELECT id FROM fts_sort_byte_equal WHERE MATCH(content) AGAINST('apple') ORDER BY id;
+SELECT id, HEX(content) AS content_hex FROM fts_sort_byte_equal ORDER BY content, id;
+# A correlated ordered subquery also exercises repeated operator execution.
+SELECT p.id, (SELECT /*+ NO_UNNEST */ HEX(q.content) FROM fts_sort_byte_equal q WHERE q.id <= p.id ORDER BY q.content, q.id LIMIT 1) AS first_content_hex FROM fts_sort_byte_equal p WHERE p.id IN (1, 3, 8, 12) ORDER BY p.id;
+
+--disable_query_log
+let $fts_sort_db_id = query_get_value(SELECT database_id FROM oceanbase.__all_database WHERE database_name = DATABASE(), database_id, 1);
+let $fts_sort_table_id = query_get_value(SELECT table_id FROM oceanbase.__all_table WHERE database_id = $fts_sort_db_id AND table_name = 'fts_sort_byte_equal', table_id, 1);
+let $fts_sort_forward = query_get_value(SELECT table_name FROM oceanbase.__all_table WHERE data_table_id = $fts_sort_table_id AND index_type = 13, table_name, 1);
+let $fts_sort_reverse = query_get_value(SELECT table_name FROM oceanbase.__all_table WHERE data_table_id = $fts_sort_table_id AND index_type = 14, table_name, 1);
+let $fts_sort_doc_rowkey = query_get_value(SELECT table_name FROM oceanbase.__all_table WHERE data_table_id = $fts_sort_table_id AND index_type = 12, table_name, 1);
+let $fts_sort_word = query_get_value(SELECT column_name FROM oceanbase.__all_column WHERE table_id = $fts_sort_table_id AND column_name LIKE '__word_segment_%', column_name, 1);
+let $fts_sort_doc = query_get_value(SELECT column_name FROM oceanbase.__all_column WHERE table_id = $fts_sort_table_id AND column_name LIKE '__doc_id_%', column_name, 1);
+let $fts_sort_frequency = query_get_value(SELECT column_name FROM oceanbase.__all_column WHERE table_id = $fts_sort_table_id AND column_name LIKE '__word_count_%', column_name, 1);
+let $fts_sort_length = query_get_value(SELECT column_name FROM oceanbase.__all_column WHERE table_id = $fts_sort_table_id AND column_name LIKE '__doc_length_%', column_name, 1);
+--echo forward index postings
+# Map binary docid back to the explicit primary key to avoid depending on generated identifiers.
+eval SELECT HEX(i.$fts_sort_word) AS word_hex, d.id, i.$fts_sort_frequency AS frequency, i.$fts_sort_length AS doc_length FROM $fts_sort_forward i JOIN $fts_sort_doc_rowkey d ON i.$fts_sort_doc = d.$fts_sort_doc ORDER BY word_hex, d.id;
+--echo reverse index postings
+eval SELECT HEX(i.$fts_sort_word) AS word_hex, d.id, i.$fts_sort_frequency AS frequency, i.$fts_sort_length AS doc_length FROM $fts_sort_reverse i JOIN $fts_sort_doc_rowkey d ON i.$fts_sort_doc = d.$fts_sort_doc ORDER BY word_hex, d.id;
+--enable_query_log
+
+DROP INDEX fts_sort_be ON fts_sort_byte_equal;
+CREATE FULLTEXT INDEX fts_sort_be ON fts_sort_byte_equal(content) WITH PARSER beng;
+
+--echo rebuilt index
+SELECT id FROM fts_sort_byte_equal WHERE MATCH(content) AGAINST('common') ORDER BY id;
+SELECT id FROM fts_sort_byte_equal WHERE MATCH(content) AGAINST('apple') ORDER BY id;
+SELECT id, HEX(content) AS content_hex FROM fts_sort_byte_equal ORDER BY content, id;
+# A correlated ordered subquery also exercises repeated operator execution.
+SELECT p.id, (SELECT /*+ NO_UNNEST */ HEX(q.content) FROM fts_sort_byte_equal q WHERE q.id <= p.id ORDER BY q.content, q.id LIMIT 1) AS first_content_hex FROM fts_sort_byte_equal p WHERE p.id IN (1, 3, 8, 12) ORDER BY p.id;
+
+--disable_query_log
+let $fts_sort_db_id = query_get_value(SELECT database_id FROM oceanbase.__all_database WHERE database_name = DATABASE(), database_id, 1);
+let $fts_sort_table_id = query_get_value(SELECT table_id FROM oceanbase.__all_table WHERE database_id = $fts_sort_db_id AND table_name = 'fts_sort_byte_equal', table_id, 1);
+let $fts_sort_forward = query_get_value(SELECT table_name FROM oceanbase.__all_table WHERE data_table_id = $fts_sort_table_id AND index_type = 13, table_name, 1);
+let $fts_sort_reverse = query_get_value(SELECT table_name FROM oceanbase.__all_table WHERE data_table_id = $fts_sort_table_id AND index_type = 14, table_name, 1);
+let $fts_sort_doc_rowkey = query_get_value(SELECT table_name FROM oceanbase.__all_table WHERE data_table_id = $fts_sort_table_id AND index_type = 12, table_name, 1);
+let $fts_sort_word = query_get_value(SELECT column_name FROM oceanbase.__all_column WHERE table_id = $fts_sort_table_id AND column_name LIKE '__word_segment_%', column_name, 1);
+let $fts_sort_doc = query_get_value(SELECT column_name FROM oceanbase.__all_column WHERE table_id = $fts_sort_table_id AND column_name LIKE '__doc_id_%', column_name, 1);
+let $fts_sort_frequency = query_get_value(SELECT column_name FROM oceanbase.__all_column WHERE table_id = $fts_sort_table_id AND column_name LIKE '__word_count_%', column_name, 1);
+let $fts_sort_length = query_get_value(SELECT column_name FROM oceanbase.__all_column WHERE table_id = $fts_sort_table_id AND column_name LIKE '__doc_length_%', column_name, 1);
+--echo forward index postings
+# Map binary docid back to the explicit primary key to avoid depending on generated identifiers.
+eval SELECT HEX(i.$fts_sort_word) AS word_hex, d.id, i.$fts_sort_frequency AS frequency, i.$fts_sort_length AS doc_length FROM $fts_sort_forward i JOIN $fts_sort_doc_rowkey d ON i.$fts_sort_doc = d.$fts_sort_doc ORDER BY word_hex, d.id;
+--echo reverse index postings
+eval SELECT HEX(i.$fts_sort_word) AS word_hex, d.id, i.$fts_sort_frequency AS frequency, i.$fts_sort_length AS doc_length FROM $fts_sort_reverse i JOIN $fts_sort_doc_rowkey d ON i.$fts_sort_doc = d.$fts_sort_doc ORDER BY word_hex, d.id;
+--enable_query_log
+
+SET ob_enable_index_direct_select = OFF;
+DROP TABLE fts_sort_byte_equal;

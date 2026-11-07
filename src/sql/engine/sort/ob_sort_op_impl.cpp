@@ -18,6 +18,9 @@
 
 #include "config_bridge.h"
 #include "ob_sort_op_impl.h"
+#include "share/datum/ob_datum_cmp_func_def.h"
+#include "share/datum/ob_datum_funcs_impl.h"
+#include "lib/container/ob_array_helper.h"
 #include "query/engine/basic/ob_encoded_sort_row.h"
 #include "data_plane/encoding/ob_cpu_features.h"
 #include "sql/engine/px/p2p_datahub/ob_pushdown_topn_filter_msg.h"
@@ -558,7 +561,7 @@ bool ObSortOpImpl::Compare::operator()(
 
 ObSortOpImpl::ObSortOpImpl() :
   inited_(false), local_merge_sort_(false), need_rewind_(false), got_first_row_(false),
-  sorted_(false), enable_encode_sortkey_(false),
+  sorted_(false), enable_encode_sortkey_(false), fts_word_equal_(false),
   page_allocator_("PartSortBucket", ObCtxIds::WORK_AREA), mem_context_(NULL),
   mem_entify_guard_(mem_context_), sort_collations_(nullptr),
   sort_cmp_funs_(nullptr), eval_ctx_(nullptr), datum_access_ctx_(nullptr),
@@ -578,7 +581,7 @@ ObSortOpImpl::ObSortOpImpl() :
 
 ObSortOpImpl::ObSortOpImpl(ObMonitorNode &op_monitor_info)
   : inited_(false), local_merge_sort_(false), need_rewind_(false),
-    got_first_row_(false), sorted_(false), enable_encode_sortkey_(false),
+    got_first_row_(false), sorted_(false), enable_encode_sortkey_(false), fts_word_equal_(false),
     page_allocator_("PartSortBucket", ObCtxIds::WORK_AREA), mem_context_(NULL),
     mem_entify_guard_(mem_context_), sort_collations_(nullptr),
     sort_cmp_funs_(nullptr), eval_ctx_(nullptr), datum_access_ctx_(nullptr),
@@ -858,6 +861,7 @@ void ObSortOpImpl::reset()
   datum_store_.reset();
   inmem_row_size_ = 0;
   local_merge_sort_ = false;
+  fts_word_equal_ = false;
   need_rewind_ = false;
   sorted_ = false;
   got_first_row_ = false;
@@ -1833,6 +1837,55 @@ int ObSortOpImpl::part_topn_heap_next(int64_t &cur_heap_idx,
   return ret;
 }
 
+namespace
+{
+template <bool NULL_FIRST>
+int fts_word_equal_cmp(const ObDatum &left, const ObDatum &right, int &cmp,
+                       const ObDatumAccessContext *access_ctx)
+{
+  if (!left.is_null() && !right.is_null() && left.len_ == right.len_
+      && (left.len_ == 0 || MEMCMP(left.ptr_, right.ptr_, left.len_) == 0)) {
+    cmp = 0;
+    return OB_SUCCESS;
+  }
+  return ObNullSafeDatumStrCmp<CS_TYPE_UTF8MB4_GENERAL_CI, false, NULL_FIRST>::cmp(
+      left, right, cmp, access_ctx);
+}
+
+class SortCmpFuncsGuard
+{
+public:
+  SortCmpFuncsGuard(ObSortOpImpl::Compare &compare, const ObIArray<ObSortCmpFunc> &funcs)
+      : compare_(compare), original_(compare.sort_cmp_funs_)
+  { compare_.sort_cmp_funs_ = &funcs; }
+  ~SortCmpFuncsGuard() { compare_.sort_cmp_funs_ = original_; }
+private:
+  ObSortOpImpl::Compare &compare_;
+  const ObIArray<ObSortCmpFunc> *original_;
+  DISALLOW_COPY_AND_ASSIGN(SortCmpFuncsGuard);
+};
+}
+
+bool ObSortOpImpl::can_use_fts_word_equal(const ObIArray<ObSortFieldCollation> &collations,
+    const ObIArray<ObSortCmpFunc> &cmp_funcs, const ExprFixedArray &exprs)
+{
+  bool eligible = false;
+  if (collations.count() == 2 && cmp_funcs.count() == 2) {
+    const ObSortFieldCollation &first = collations.at(0);
+    const ObExpr *expr = first.field_idx_ < exprs.count() ? exprs.at(first.field_idx_) : nullptr;
+    if (nullptr != expr && expr->datum_meta_.type_ == ObVarcharType
+        && expr->datum_meta_.cs_type_ == CS_TYPE_UTF8MB4_GENERAL_CI
+        && first.cs_type_ == CS_TYPE_UTF8MB4_GENERAL_CI
+        && !expr->obj_meta_.has_lob_header()
+        && (first.null_pos_ == NULL_FIRST || first.null_pos_ == NULL_LAST)) {
+      eligible = cmp_funcs.at(0).cmp_func_ == ObDatumFuncs::get_nullsafe_cmp_func(
+          ObVarcharType, ObVarcharType, first.null_pos_, CS_TYPE_UTF8MB4_GENERAL_CI,
+          expr->datum_meta_.scale_, false, expr->datum_meta_.precision_, expr->datum_meta_.precision_);
+    }
+  }
+  return eligible;
+}
+
 int ObSortOpImpl::sort_inmem_data()
 {
   int ret = OB_SUCCESS;
@@ -1861,6 +1914,19 @@ int ObSortOpImpl::sort_inmem_data()
           comp_.enable_encode_sortkey_ = false;
           lib::ob_sort(&rows_->at(begin), &rows_->at(0) + rows_->count(), CopyableComparer(comp_));
         }
+      } else if (fts_word_equal_ && !use_heap_sort_ && !local_merge_sort_
+          && !is_fetch_with_ties_ && nullptr != sort_exprs_
+          && comp_.cmp_start_ == 0 && comp_.cmp_end_ == sort_collations_->count()
+          && can_use_fts_word_equal(*sort_collations_, *sort_cmp_funs_, *sort_exprs_)) {
+        // Borrow a stack-local function table only for this ordinary in-memory
+        // sort. Compare retains status/error checks; EMS and with-ties retain
+        // the original table, including after a failed comparison.
+        ObSortCmpFunc functions[2] = {sort_cmp_funs_->at(0), sort_cmp_funs_->at(1)};
+        functions[0].cmp_func_ = sort_collations_->at(0).null_pos_ == NULL_FIRST
+            ? fts_word_equal_cmp<true> : fts_word_equal_cmp<false>;
+        ObArrayHelper<ObSortCmpFunc> local_functions(2, functions, 2);
+        SortCmpFuncsGuard guard(comp_, local_functions);
+        lib::ob_sort(&rows_->at(begin), &rows_->at(0) + rows_->count(), CopyableComparer(comp_));
       } else {
         lib::ob_sort(&rows_->at(begin), &rows_->at(0) + rows_->count(), CopyableComparer(comp_));
       }

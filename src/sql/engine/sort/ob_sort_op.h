@@ -41,7 +41,7 @@ public:
     K_(topn_expr), K_(topk_limit_expr), K_(topk_offset_expr), K_(prefix_pos),
     K_(minimum_row_count), K_(topk_precision), K_(prefix_pos), K_(is_local_merge_sort),
     K_(prescan_enabled), K_(enable_encode_sortkey_opt), K_(part_cnt),
-    K_(compress_type), K_(pd_topn_filter_info));
+    K_(compress_type), K_(pd_topn_filter_info), K_(fts_word_equal));
 
   inline bool enable_pd_topn_filter() const { return pd_topn_filter_info_.enabled_; }
 public:
@@ -67,6 +67,7 @@ public:
   // if use, all_exprs_ is : hash(part_by) + part_by + order_by.
   int64_t part_cnt_;
   ObPushDownTopNFilterInfo pd_topn_filter_info_;
+  bool fts_word_equal_;
 };
 
 class ObSortOp : public ObOperator

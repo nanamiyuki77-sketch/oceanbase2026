@@ -1389,6 +1389,77 @@ int ObStaticEngineCG::fill_sort_funcs(
  * Sort places the ObExpr of the sort columns at the front, followed by all ObExpr in output_, and also removes duplicates
  * all_expr: sort_exprs + output_exprs
  **/
+bool ObStaticEngineCG::is_fts_word_first_sort(ObLogSort &op,
+    const schema::ObTableSchema &index_schema, const schema::ObTableSchema &data_schema)
+{
+  bool eligible = false;
+  uint64_t word_id = OB_INVALID_ID;
+  const schema::ObColumnSchemaV2 *word_column = nullptr;
+  const ObLogPlan *plan = op.get_plan();
+  if (nullptr == plan || !plan->get_optimizer_context().is_insert_stmt_in_online_ddl()
+      || nullptr == plan->get_optimizer_context().get_root_stmt()
+      || nullptr == plan->get_optimizer_context().get_root_stmt()->get_table_item(0)
+      || plan->get_optimizer_context().get_root_stmt()->get_table_item(0)->ddl_table_id_
+          != index_schema.get_table_id()
+      || !index_schema.is_fts_index_aux()
+      || index_schema.get_data_table_id() != data_schema.get_table_id()
+      || op.get_sort_keys().count() != 2 || op.get_num_of_child() != 1
+      || op.get_prefix_pos() != 0 || op.is_local_merge_sort()
+      || op.enable_encode_sortkey_opt() || op.get_part_cnt() != 0
+      || nullptr != op.get_topn_expr() || nullptr != op.get_topk_limit_expr()
+      || OB_SUCCESS != index_schema.get_rowkey_info().get_column_id(0, word_id)
+      || nullptr == (word_column = data_schema.get_column_schema(word_id))
+      || !word_column->is_word_segment_column()
+      || word_column->get_data_type() != ObVarcharType
+      || word_column->get_collation_type() != CS_TYPE_UTF8MB4_GENERAL_CI) {
+    // Unsupported or unproven origins retain the original comparator.
+  } else {
+    const ObRawExpr *expr = op.get_sort_keys().at(0).expr_;
+    const ObLogicalOperator *child = op.get_child(0);
+    for (int64_t depth = 0; depth < 64 && nullptr != child && nullptr != expr; ++depth) {
+      if (child->get_type() == log_op_def::LOG_TABLE_SCAN) {
+        const ObLogTableScan &scan = static_cast<const ObLogTableScan &>(*child);
+        const ObIArray<ObRawExpr *> &outputs = scan.get_output_exprs();
+        const ObIArray<uint64_t> &ids = scan.get_ddl_output_column_ids();
+        // IDs are saved before generated-column replacement; output positions
+        // are retained when the column is replaced by its WORD_SEGMENT expression.
+        if (scan.get_real_ref_table_id() == data_schema.get_table_id()
+            && outputs.count() == ids.count()
+            && expr->get_expr_type() == T_FUN_SYS_WORD_SEGMENT) {
+          for (int64_t i = 0; !eligible && i < outputs.count(); ++i) {
+            eligible = outputs.at(i) == expr && ids.at(i) == word_id;
+          }
+        }
+        break;
+      } else if (child->get_num_of_child() != 1 || nullptr == child->get_child(0)) {
+        break;
+      } else if (child->get_type() == log_op_def::LOG_SUBPLAN_SCAN) {
+        const ObLogSubPlanScan &scan = static_cast<const ObLogSubPlanScan &>(*child);
+        if (!expr->is_column_ref_expr()) {
+          break;
+        }
+        const ObColumnRefRawExpr &column = static_cast<const ObColumnRefRawExpr &>(*expr);
+        const int64_t idx = column.get_column_id() - OB_APP_MIN_COLUMN_ID;
+        bool is_access = false;
+        for (int64_t i = 0; !is_access && i < scan.get_access_exprs().count(); ++i) {
+          is_access = scan.get_access_exprs().at(i) == expr;
+        }
+        if (!is_access || column.get_table_id() != scan.get_subquery_id()
+            || idx < 0 || idx >= child->get_child(0)->get_output_exprs().count()) {
+          break;
+        }
+        expr = child->get_child(0)->get_output_exprs().at(idx);
+      } else if (child->get_type() != log_op_def::LOG_EXCHANGE
+          && child->get_type() != log_op_def::LOG_GRANULE_ITERATOR
+          && child->get_type() != log_op_def::LOG_STAT_COLLECTOR) {
+        break;
+      }
+      child = child->get_child(0);
+    }
+  }
+  return eligible;
+}
+
 int ObStaticEngineCG::generate_spec(ObLogSort &op, ObSortSpec &spec, const bool in_root_job)
 {
   int ret = OB_SUCCESS;
@@ -1462,6 +1533,20 @@ int ObStaticEngineCG::generate_spec(ObLogSort &op, ObSortSpec &spec, const bool 
         }
         spec.enable_encode_sortkey_opt_ = op.enable_encode_sortkey_opt();
         spec.part_cnt_ = op.get_part_cnt();
+        if (opt_ctx_->is_insert_stmt_in_online_ddl()) {
+          const TableItem *table = opt_ctx_->get_root_stmt()->get_table_item(0);
+          const schema::ObTableSchema *index_schema = nullptr;
+          const schema::ObTableSchema *data_schema = nullptr;
+          schema::ObSchemaGetterGuard *guard = opt_ctx_->get_schema_guard();
+          // This is optional: an unavailable proof must not fail plan generation.
+          if (nullptr != table && nullptr != guard
+              && OB_SUCCESS == guard->get_table_schema(table->ddl_table_id_, index_schema)
+              && nullptr != index_schema && index_schema->is_fts_index_aux()
+              && OB_SUCCESS == guard->get_table_schema(index_schema->get_data_table_id(), data_schema)
+              && nullptr != data_schema) {
+            spec.fts_word_equal_ = is_fts_word_first_sort(op, *index_schema, *data_schema);
+          }
+        }
         LOG_TRACE("trace order by", K(spec.all_exprs_.count()), K(spec.all_exprs_));
 
       }

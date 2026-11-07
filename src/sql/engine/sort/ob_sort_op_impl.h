@@ -272,6 +272,10 @@ public:
       const bool use_compact_format = false,
       const ObPushDownTopNFilterInfo *pd_topn_filter_info = nullptr);
 
+  void set_fts_word_equal(const bool enabled) { fts_word_equal_ = enabled; }
+  static bool can_use_fts_word_equal(const ObIArray<ObSortFieldCollation> &collations,
+      const ObIArray<ObSortCmpFunc> &cmp_funcs, const ExprFixedArray &exprs);
+
   virtual int64_t get_prefix_pos() const { return 0;  }
   // keep initialized, can sort same rows (same cell type, cell count, projector) after reuse.
   virtual void reuse();
@@ -821,6 +825,7 @@ protected:
   bool got_first_row_;
   bool sorted_;
   bool enable_encode_sortkey_;
+  bool fts_word_equal_;
   ModulePageAllocator page_allocator_;
   lib::MemoryContext mem_context_;
   MemEntifyFreeGuard mem_entify_guard_;
